@@ -1,0 +1,8 @@
+{
+  "version": "2.1.0",
+  "release_date": "2026-09-08",
+  "title": "VIPQC AI v2.1.0 — Bản Cập Nhật Tối Ưu & Tự Động Cập Nhật",
+  "changelog": "- Tự động kiểm tra tính hợp lệ Model & Series khi so sánh bản vẽ\n- Tự động nhận diện và gọt sạch hậu tố sản xuất MP, PP, (1)\n- Khắc phục triệt để lỗi không kéo được bản vẽ sang trái và phóng to 500%\n- Tích hợp động cơ kiểm tra và tự động cập nhật phiên bản mới qua GitHub",
+  "download_url": "https://github.com/levanvung/VIPQC/raw/master/VIPQC%20AI.exe",
+  "release_url": "https://github.com/levanvung/VIPQC"
+}

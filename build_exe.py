@@ -57,7 +57,11 @@ def build():
         "--hidden-import", "bom_extractor",
         "--hidden-import", "excel_exporter",
         "--hidden-import", "model_comparator",
+        "--hidden-import", "updater",
     ]
+
+    if os.path.exists("version.json"):
+        cmd.extend(["--add-data", f"version.json{os.pathsep}."])
 
     if ctk_data:
         cmd += ["--add-data", ctk_data]

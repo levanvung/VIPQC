@@ -16,6 +16,9 @@ import tkinter.ttk as ttk
 from tkinter import filedialog, messagebox
 import customtkinter as ctk
 from PIL import Image, ImageDraw, ImageTk
+import webbrowser
+import tempfile
+import updater
 
 # Ensure Windows C-runtime DLLs are available for PyMuPDF
 if sys.platform == "win32":
@@ -730,6 +733,180 @@ class FileRow(ctk.CTkFrame):
     def _remove(self):
         self._on_remove(self.path)
         self.destroy()
+
+
+# ─── GitHub Auto-Update Notification & Download Dialog ─────────────────────────
+class UpdateDialog(ctk.CTkToplevel):
+    """
+    Holographic update notification dialog that displays new release details,
+    the changelog, and allows one-click background download and in-place update.
+    """
+    def __init__(self, parent, update_info: dict):
+        super().__init__(parent)
+        self.parent = parent
+        self.update_info = update_info
+        self._is_downloading = False
+
+        self.title("🚀 Cập Nhật VIPQC AI")
+        self.geometry("540x480")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        # Center over parent window
+        self.update_idletasks()
+        px = parent.winfo_x() + (parent.winfo_width() - 540) // 2
+        py = parent.winfo_y() + (parent.winfo_height() - 480) // 2
+        self.geometry(f"+{max(10, px)}+{max(10, py)}")
+
+        self.configure(fg_color=BG_CARD)
+
+        # Outer card with glowing accent border
+        card = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=12, border_width=1.5, border_color=ACCENT_TEAL)
+        card.pack(fill="both", expand=True, padx=16, pady=16)
+
+        # Header with rocket icon and version banner
+        hdr = ctk.CTkFrame(card, fg_color="transparent")
+        hdr.pack(fill="x", padx=16, pady=(16, 6))
+
+        ctk.CTkLabel(hdr, text="🚀", font=("Segoe UI", 26)).pack(side="left", padx=(0, 10))
+
+        title_box = ctk.CTkFrame(hdr, fg_color="transparent")
+        title_box.pack(side="left", fill="x", expand=True)
+
+        ctk.CTkLabel(
+            title_box, text="ĐÃ CÓ PHIÊN BẢN CẬP NHẬT MỚI!",
+            font=("Segoe UI", 12, "bold"), text_color=ACCENT_TEAL, anchor="w"
+        ).pack(fill="x")
+
+        curr_v = update_info.get("current_version", updater.CURRENT_VERSION)
+        lat_v = update_info.get("latest_version", "")
+        ctk.CTkLabel(
+            title_box, text=f"Hiện tại: v{curr_v}   ➜   Mới nhất: v{lat_v}",
+            font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY, anchor="w"
+        ).pack(fill="x")
+
+        # Subtitle / Release title
+        rel_title = update_info.get("title") or f"VIPQC AI v{lat_v}"
+        ctk.CTkLabel(
+            card, text=rel_title,
+            font=("Segoe UI", 11, "bold"), text_color=ACCENT_BLUE, anchor="w"
+        ).pack(fill="x", padx=20, pady=(2, 6))
+
+        # Changelog Header
+        ctk.CTkLabel(
+            card, text="📋 Nội dung bản cập nhật mới (Changelog):",
+            font=("Segoe UI", 10, "bold"), text_color=TEXT_MUTED, anchor="w"
+        ).pack(fill="x", padx=20, pady=(2, 2))
+
+        # Changelog Textbox
+        tb = ctk.CTkTextbox(
+            card, height=130, corner_radius=8,
+            fg_color=BG_SURFACE, text_color=TEXT_PRIMARY,
+            border_width=1, border_color=BORDER_CLR, font=("Segoe UI", 10)
+        )
+        tb.pack(fill="x", padx=20, pady=(0, 10))
+        changelog_text = update_info.get("changelog") or "Bản cập nhật cải tiến hiệu năng và tính năng mới."
+        tb.insert("1.0", changelog_text)
+        tb.configure(state="disabled")
+
+        # Download Progress Area (Initially Hidden)
+        self.prog_frame = ctk.CTkFrame(card, fg_color="transparent")
+
+        self.lbl_progress = ctk.CTkLabel(
+            self.prog_frame, text="Đang chuẩn bị tải xuống...",
+            font=("Segoe UI", 9, "bold"), text_color=TEXT_PRIMARY, anchor="w"
+        )
+        self.lbl_progress.pack(fill="x", pady=(0, 4))
+
+        self.prog_bar = ctk.CTkProgressBar(
+            self.prog_frame, height=10, corner_radius=5,
+            fg_color=BG_SURFACE, progress_color=ACCENT_TEAL
+        )
+        self.prog_bar.set(0.0)
+        self.prog_bar.pack(fill="x")
+
+        # Buttons Row
+        self.btn_row = ctk.CTkFrame(card, fg_color="transparent")
+        self.btn_row.pack(side="bottom", fill="x", padx=20, pady=(10, 14))
+
+        self.btn_update = ctk.CTkButton(
+            self.btn_row, text="⚡ Cập Nhật Tự Động",
+            font=("Segoe UI", 11, "bold"), height=36,
+            fg_color=ACCENT_TEAL, hover_color=("#0F766E", "#00A88C"),
+            command=self._start_auto_update
+        )
+        self.btn_update.pack(side="left", fill="x", expand=True, padx=(0, 6))
+
+        self.btn_github = ctk.CTkButton(
+            self.btn_row, text="🌐 Mở GitHub",
+            font=("Segoe UI", 10, "bold"), height=36, width=105,
+            fg_color=BG_SURFACE, text_color=TEXT_PRIMARY, hover_color=BG_HOVER,
+            command=self._open_github
+        )
+        self.btn_github.pack(side="left", padx=(0, 6))
+
+        self.btn_cancel = ctk.CTkButton(
+            self.btn_row, text="❌ Để Sau",
+            font=("Segoe UI", 10), height=36, width=80,
+            fg_color="transparent", text_color=TEXT_MUTED, hover_color=BG_HOVER,
+            command=self.destroy
+        )
+        self.btn_cancel.pack(side="right")
+
+    def _start_auto_update(self):
+        if self._is_downloading:
+            return
+        self._is_downloading = True
+
+        self.btn_update.configure(state="disabled", text="⚡ Đang tải...")
+        self.btn_github.configure(state="disabled")
+        self.btn_cancel.configure(state="disabled")
+        self.prog_frame.pack(fill="x", padx=20, pady=(0, 10))
+
+        download_url = self.update_info.get("download_url") or updater.DEFAULT_EXE_DOWNLOAD_URL
+        latest_v = self.update_info.get("latest_version", "new")
+        target_file = os.path.join(tempfile.gettempdir(), f"VIPQC_AI_Update_{latest_v}.exe")
+
+        def _bg():
+            try:
+                def on_progress(pct, downloaded, total):
+                    def update_ui():
+                        self.prog_bar.set(pct / 100.0)
+                        dl_mb = downloaded / (1024 * 1024)
+                        tot_mb = total / (1024 * 1024)
+                        self.lbl_progress.configure(
+                            text=f"Đang tải: {pct:.0f}% ({dl_mb:.1f} MB / {tot_mb:.1f} MB)..."
+                        )
+                    self.after(0, update_ui)
+
+                ok = updater.download_update_file(download_url, target_file, progress_callback=on_progress)
+                if ok:
+                    self.after(0, lambda: self.lbl_progress.configure(text="✅ Tải thành công! Đang thay thế và khởi động lại..."))
+                    time.sleep(1.2)
+                    updater.apply_update_and_restart(target_file)
+                else:
+                    self.after(0, lambda: self._on_error("File tải về không hoàn chỉnh hoặc rỗng."))
+            except Exception as e:
+                self.after(0, lambda err=e: self._on_error(str(err)))
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _on_error(self, err_msg):
+        self._is_downloading = False
+        self.btn_update.configure(state="normal", text="Thử Lại")
+        self.btn_github.configure(state="normal")
+        self.btn_cancel.configure(state="normal")
+        self.lbl_progress.configure(text=f"❌ Lỗi: {err_msg}", text_color="#EF4444")
+        messagebox.showerror(
+            "Lỗi Cập Nhật",
+            f"Không thể tải bản cập nhật tự động:\n{err_msg}\n\nBạn có thể bấm 'Mở GitHub' để tải file trực tiếp."
+        )
+
+    def _open_github(self):
+        url = self.update_info.get("release_url") or updater.GITHUB_REPO_URL
+        webbrowser.open(url)
+
 
 class BOMCompareView(ctk.CTkFrame):
     """
@@ -4195,6 +4372,9 @@ class BOMExtractorApp(ctk.CTk):
             font=FONT_BODY, text_color=TEXT_MUTED, anchor="w")
         self.lbl_status.pack(side="left", fill="x", expand=True, padx=16, pady=6)
 
+        # Silent background update check after 3.5 seconds
+        self.after(3500, self._auto_check_update)
+
     # ── SIDEBAR INTERNALS ────────────────────────────────────────────────────
     def _build_sidebar(self, parent):
         # Section Label
@@ -4288,15 +4468,19 @@ class BOMExtractorApp(ctk.CTk):
         )
         self.lbl_sidebar_author.pack(fill="x", padx=8, pady=(0, 4))
 
-        self.lbl_sidebar_version = ctk.CTkLabel(
+        # Interactive Version Badge & Update Checker Button
+        self.btn_sidebar_update = ctk.CTkButton(
             self.card_copyright,
-            text="⭐ v2.5 Pro Edition ⭐",
+            text=f"🔄 v{updater.CURRENT_VERSION} • Cập nhật",
             font=("Segoe UI", 9, "bold"),
+            fg_color=BG_CARD,
+            hover_color=BG_HOVER,
             text_color=ACCENT_AMBER,
-            anchor="center",
-            justify="center"
+            corner_radius=6,
+            height=26,
+            command=self._manual_check_update
         )
-        self.lbl_sidebar_version.pack(fill="x", padx=8, pady=(0, 10))
+        self.btn_sidebar_update.pack(fill="x", padx=10, pady=(0, 10))
 
     # ── LEFT PANEL INTERNALS ─────────────────────────────────────────────────
     def _build_left(self, parent):
@@ -5493,6 +5677,46 @@ class BOMExtractorApp(ctk.CTk):
         d = self.output_dir.get().strip() or "excel_results"
         os.makedirs(d, exist_ok=True)
         os.startfile(d)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # GITHUB AUTO-UPDATE INTEGRATION
+    # ──────────────────────────────────────────────────────────────────────────
+    def _auto_check_update(self):
+        """Silently checks for new releases on GitHub in a background thread."""
+        def _check():
+            try:
+                res = updater.check_for_updates(timeout=6)
+                if res.get("has_update"):
+                    self.after(0, lambda: self._show_update_dialog(res))
+            except Exception:
+                pass
+
+        threading.Thread(target=_check, daemon=True).start()
+
+    def _manual_check_update(self):
+        """Triggered when user clicks the version badge in the sidebar footer."""
+        self.show_toast("📡 Đang kiểm tra bản cập nhật từ GitHub...")
+
+        def _check():
+            try:
+                res = updater.check_for_updates(timeout=8)
+                if res.get("has_update"):
+                    self.after(0, lambda: self._show_update_dialog(res))
+                elif res.get("error"):
+                    self.after(0, lambda: self.show_toast("⚠️ Không thể kết nối tới GitHub. Vui lòng kiểm tra mạng!"))
+                else:
+                    self.after(0, lambda: self.show_toast(f"✅ Bạn đang dùng phiên bản mới nhất (v{updater.CURRENT_VERSION})!"))
+            except Exception:
+                self.after(0, lambda: self.show_toast("⚠️ Lỗi kiểm tra cập nhật."))
+
+        threading.Thread(target=_check, daemon=True).start()
+
+    def _show_update_dialog(self, update_info: dict):
+        """Displays the update notification popup."""
+        try:
+            UpdateDialog(self, update_info)
+        except Exception as e:
+            print(f"Error opening update dialog: {e}")
 
 
 # ─── Entry Point ──────────────────────────────────────────────────────────────
