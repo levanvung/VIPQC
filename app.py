@@ -4153,7 +4153,9 @@ class SeriesBOMCompareView(ctk.CTkFrame):
     """
     Dedicated view for comparing 2 BOMs of the same model across different series.
     Supports ERP Multi-level BOM PDFs and Excel BOMs.
-    Features the QC Focus Checklist for fast, targeted First Article Inspection (FAI).
+    Features the QC Focus Checklist, Working Manual PCB Drawing Upload with
+    multi-color border highlighting (Green: Added, Red: Removed/DNP, Amber: Modified),
+    and Holographic Cyberpunk AI Scan Loading Animation.
     """
     def __init__(self, parent, app):
         super().__init__(parent, fg_color="transparent")
@@ -4161,13 +4163,33 @@ class SeriesBOMCompareView(ctk.CTkFrame):
 
         self.file_a = None
         self.file_b = None
+        self.file_drawing = None
+        self.drawing_page_idx = 0
+        self.drawing_pages = []
+
         self.bom_a_data = None
         self.bom_b_data = None
         self.comparison_result = None
+
+        self.display_mode = "split"  # 'table', 'drawing', 'split'
         self.filter_mode = "focus"
         self.search_query = ""
         self.is_comparing = False
+
         self.qc_status_map = {}  # loc -> 'OK', 'NG', 'PENDING'
+        self.active_loc = None
+
+        # Drawing canvas state
+        self.zoom_level = 1.0
+        self.rotation_angle = 0
+        self.pixel_coords_map = {}
+        self.current_annotated_img = None
+        self.tk_canvas_img = None
+        self.canvas_img_id = None
+        self.pan_start_x = 0
+        self.pan_start_y = 0
+
+        self._loading_hud = None
 
         self._build_ui()
 
@@ -4175,103 +4197,130 @@ class SeriesBOMCompareView(ctk.CTkFrame):
         return self.app.t(key, **kwargs)
 
     def _build_ui(self):
-        # ── 1. TOP CARDS: FILE UPLOAD & CONTROLS ─────────────────────────────
+        # ── 1. TOP CONTAINER: 3 UPLOAD CARDS + ACTIONS ───────────────────────
         top_container = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=12,
                                      border_width=1, border_color=BORDER_CLR)
-        top_container.pack(fill="x", padx=4, pady=(4, 8))
+        top_container.pack(fill="x", padx=4, pady=(4, 6))
 
         inner_top = ctk.CTkFrame(top_container, fg_color="transparent")
-        inner_top.pack(fill="x", padx=12, pady=10)
+        inner_top.pack(fill="x", padx=10, pady=8)
 
-        # Left Card: Series A
+        # Card 1: Series A BOM
         self.card_a = ctk.CTkFrame(inner_top, fg_color=BG_SURFACE, corner_radius=8,
                                    border_width=1, border_color=BORDER_CLR)
-        self.card_a.pack(side="left", fill="both", expand=True, padx=(0, 6))
+        self.card_a.pack(side="left", fill="both", expand=True, padx=(0, 4))
 
-        a_header = ctk.CTkFrame(self.card_a, fg_color="transparent")
-        a_header.pack(fill="x", padx=8, pady=(8, 2))
-        ctk.CTkLabel(a_header, text="1. BOM GỐC (SERIES A / CŨ)", font=("Segoe UI", 11, "bold"),
+        a_head = ctk.CTkFrame(self.card_a, fg_color="transparent")
+        a_head.pack(fill="x", padx=8, pady=(6, 2))
+        ctk.CTkLabel(a_head, text="1. BOM GỐC (A)", font=("Segoe UI", 10, "bold"),
                      text_color=ACCENT_BLUE).pack(side="left")
-
-        self.btn_select_a = ctk.CTkButton(
-            a_header, text="📂 Chọn File (.pdf/.xlsx)", font=("Segoe UI", 10, "bold"),
-            height=28, width=130, fg_color=ACCENT_BLUE, hover_color="#1E40AF",
+        ctk.CTkButton(
+            a_head, text="📂 Chọn BOM A", font=("Segoe UI", 9, "bold"),
+            height=24, width=95, fg_color=ACCENT_BLUE, hover_color="#1E40AF",
             command=self._select_file_a
-        )
-        self.btn_select_a.pack(side="right")
+        ).pack(side="right")
 
         self.lbl_file_a_name = ctk.CTkLabel(
-            self.card_a, text="Chưa chọn file (Kéo thả hoặc nhấn nút chọn)",
-            font=("Segoe UI", 10), text_color=TEXT_MUTED, anchor="w"
+            self.card_a, text="Chưa chọn BOM Series A", font=("Segoe UI", 9),
+            text_color=TEXT_MUTED, anchor="w"
         )
-        self.lbl_file_a_name.pack(fill="x", padx=8, pady=(2, 2))
+        self.lbl_file_a_name.pack(fill="x", padx=8, pady=(1, 1))
 
         self.lbl_file_a_meta = ctk.CTkLabel(
-            self.card_a, text="Model: — | Series: —", font=("Segoe UI", 9, "bold"),
+            self.card_a, text="Model: — | Series: —", font=("Segoe UI", 8, "bold"),
             text_color=ACCENT_TEAL, anchor="w"
         )
-        self.lbl_file_a_meta.pack(fill="x", padx=8, pady=(0, 6))
+        self.lbl_file_a_meta.pack(fill="x", padx=8, pady=(0, 4))
 
-        # Right Card: Series B
+        # Card 2: Series B BOM
         self.card_b = ctk.CTkFrame(inner_top, fg_color=BG_SURFACE, corner_radius=8,
                                    border_width=1, border_color=BORDER_CLR)
-        self.card_b.pack(side="left", fill="both", expand=True, padx=(6, 6))
+        self.card_b.pack(side="left", fill="both", expand=True, padx=(4, 4))
 
-        b_header = ctk.CTkFrame(self.card_b, fg_color="transparent")
-        b_header.pack(fill="x", padx=8, pady=(8, 2))
-        ctk.CTkLabel(b_header, text="2. BOM SO SÁNH (SERIES B / MỚI)", font=("Segoe UI", 11, "bold"),
+        b_head = ctk.CTkFrame(self.card_b, fg_color="transparent")
+        b_head.pack(fill="x", padx=8, pady=(6, 2))
+        ctk.CTkLabel(b_head, text="2. BOM SO SÁNH (B)", font=("Segoe UI", 10, "bold"),
                      text_color=ACCENT_TEAL).pack(side="left")
-
-        self.btn_select_b = ctk.CTkButton(
-            b_header, text="📂 Chọn File (.pdf/.xlsx)", font=("Segoe UI", 10, "bold"),
-            height=28, width=130, fg_color=ACCENT_TEAL, hover_color="#0D9488",
+        ctk.CTkButton(
+            b_head, text="📂 Chọn BOM B", font=("Segoe UI", 9, "bold"),
+            height=24, width=95, fg_color=ACCENT_TEAL, hover_color="#0D9488",
             command=self._select_file_b
-        )
-        self.btn_select_b.pack(side="right")
+        ).pack(side="right")
 
         self.lbl_file_b_name = ctk.CTkLabel(
-            self.card_b, text="Chưa chọn file (Kéo thả hoặc nhấn nút chọn)",
-            font=("Segoe UI", 10), text_color=TEXT_MUTED, anchor="w"
+            self.card_b, text="Chưa chọn BOM Series B", font=("Segoe UI", 9),
+            text_color=TEXT_MUTED, anchor="w"
         )
-        self.lbl_file_b_name.pack(fill="x", padx=8, pady=(2, 2))
+        self.lbl_file_b_name.pack(fill="x", padx=8, pady=(1, 1))
 
         self.lbl_file_b_meta = ctk.CTkLabel(
-            self.card_b, text="Model: — | Series: —", font=("Segoe UI", 9, "bold"),
+            self.card_b, text="Model: — | Series: —", font=("Segoe UI", 8, "bold"),
             text_color=ACCENT_TEAL, anchor="w"
         )
-        self.lbl_file_b_meta.pack(fill="x", padx=8, pady=(0, 6))
+        self.lbl_file_b_meta.pack(fill="x", padx=8, pady=(0, 4))
 
-        # Right Action Buttons
+        # Card 3: Working Manual PCB Drawing PDF
+        self.card_dwg = ctk.CTkFrame(inner_top, fg_color=BG_SURFACE, corner_radius=8,
+                                    border_width=1, border_color=BORDER_CLR)
+        self.card_dwg.pack(side="left", fill="both", expand=True, padx=(4, 6))
+
+        dwg_head = ctk.CTkFrame(self.card_dwg, fg_color="transparent")
+        dwg_head.pack(fill="x", padx=8, pady=(6, 2))
+        ctk.CTkLabel(dwg_head, text="3. BẢN VẼ PCB (PDF)", font=("Segoe UI", 10, "bold"),
+                     text_color=ACCENT_AMBER).pack(side="left")
+        ctk.CTkButton(
+            dwg_head, text="📐 Chọn Bản Vẽ", font=("Segoe UI", 9, "bold"),
+            height=24, width=95, fg_color=ACCENT_AMBER, hover_color="#B45309",
+            command=self._select_file_drawing
+        ).pack(side="right")
+
+        self.lbl_file_dwg_name = ctk.CTkLabel(
+            self.card_dwg, text="Chưa tải bản vẽ PCB (Tùy chọn)", font=("Segoe UI", 9),
+            text_color=TEXT_MUTED, anchor="w"
+        )
+        self.lbl_file_dwg_name.pack(fill="x", padx=8, pady=(1, 1))
+
+        dwg_sub = ctk.CTkFrame(self.card_dwg, fg_color="transparent")
+        dwg_sub.pack(fill="x", padx=8, pady=(0, 4))
+
+        ctk.CTkLabel(dwg_sub, text="Trang:", font=("Segoe UI", 8, "bold"), text_color=TEXT_MUTED).pack(side="left", padx=(0, 4))
+        self.opt_dwg_page = ctk.CTkOptionMenu(
+            dwg_sub, values=["Trang 1"], width=130, height=20, corner_radius=4,
+            font=("Segoe UI", 8), command=self._on_drawing_page_selected
+        )
+        self.opt_dwg_page.pack(side="left")
+
+        # Action Buttons Box
         act_box = ctk.CTkFrame(inner_top, fg_color="transparent")
-        act_box.pack(side="right", fill="y", padx=(6, 0))
+        act_box.pack(side="right", fill="y", padx=(4, 0))
 
         self.btn_run_compare = ctk.CTkButton(
-            act_box, text="⚡  SO SÁNH BOM", font=("Segoe UI", 12, "bold"),
-            height=38, width=150, fg_color=ACCENT_TEAL, hover_color="#0F766E",
+            act_box, text="⚡ SO SÁNH & ĐỊNH VỊ", font=("Segoe UI", 11, "bold"),
+            height=34, width=155, fg_color=ACCENT_TEAL, hover_color="#0F766E",
             command=self._start_compare
         )
-        self.btn_run_compare.pack(fill="x", pady=(2, 4))
+        self.btn_run_compare.pack(fill="x", pady=(1, 3))
 
         self.btn_export_fai = ctk.CTkButton(
-            act_box, text="📥 Xuất Báo Cáo FAI", font=("Segoe UI", 10, "bold"),
-            height=28, width=150, fg_color="#1E3A8A", hover_color="#1E40AF",
+            act_box, text="📥 Xuất Báo Cáo FAI", font=("Segoe UI", 9, "bold"),
+            height=24, width=155, fg_color="#1E3A8A", hover_color="#1E40AF",
             state="disabled", command=self._export_excel
         )
-        self.btn_export_fai.pack(fill="x", pady=(2, 0))
+        self.btn_export_fai.pack(fill="x", pady=(1, 0))
 
-        # ── 2. VALIDATION BANNER & STATS ──────────────────────────────────────
+        # ── 2. VALIDATION & STATS BANNER ─────────────────────────────────────
         self.banner_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.banner_frame.pack(fill="x", padx=4, pady=(0, 6))
+        self.banner_frame.pack(fill="x", padx=4, pady=(0, 4))
 
         self.lbl_validation = ctk.CTkLabel(
-            self.banner_frame, text="💡 Vui lòng chọn 2 file BOM (PDF hoặc Excel) rồi nhấn '⚡ SO SÁNH BOM'.",
-            font=("Segoe UI", 10, "italic"), text_color=TEXT_MUTED, anchor="w"
+            self.banner_frame, text="💡 Vui lòng chọn 2 file BOM (PDF hoặc Excel) rồi nhấn '⚡ SO SÁNH & ĐỊNH VỊ'.",
+            font=("Segoe UI", 9, "italic"), text_color=TEXT_MUTED, anchor="w"
         )
         self.lbl_validation.pack(fill="x", padx=4)
 
         self.stats_container = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=8,
                                            border_width=1, border_color=BORDER_CLR)
-        self.stats_container.pack(fill="x", padx=4, pady=(0, 8))
+        self.stats_container.pack(fill="x", padx=4, pady=(0, 6))
 
         self.kpi_boxes = {}
         kpi_defs = [
@@ -4285,122 +4334,215 @@ class SeriesBOMCompareView(ctk.CTkFrame):
 
         for k_id, k_title, k_val, k_col in kpi_defs:
             f = ctk.CTkFrame(self.stats_container, fg_color=BG_SURFACE, corner_radius=6)
-            f.pack(side="left", fill="both", expand=True, padx=4, pady=6)
-            lbl_t = ctk.CTkLabel(f, text=k_title, font=("Segoe UI", 9, "bold"), text_color=TEXT_MUTED)
-            lbl_t.pack(pady=(4, 0))
-            lbl_v = ctk.CTkLabel(f, text=k_val, font=("Segoe UI", 12, "bold"), text_color=k_col)
-            lbl_v.pack(pady=(0, 4))
+            f.pack(side="left", fill="both", expand=True, padx=3, pady=4)
+            lbl_t = ctk.CTkLabel(f, text=k_title, font=("Segoe UI", 8, "bold"), text_color=TEXT_MUTED)
+            lbl_t.pack(pady=(2, 0))
+            lbl_v = ctk.CTkLabel(f, text=k_val, font=("Segoe UI", 11, "bold"), text_color=k_col)
+            lbl_v.pack(pady=(0, 2))
             self.kpi_boxes[k_id] = (lbl_t, lbl_v, k_col)
 
-        # ── 3. QC FOCUS CHECKLIST HERO CARD ───────────────────────────────────
+        # ── 3. QC FOCUS CHECKLIST HERO CARD & DISPLAY MODE ───────────────────
         self.card_qc_focus = ctk.CTkFrame(
             self, fg_color=("#F0FDFA", "#13232C"), border_width=1.5,
-            border_color=ACCENT_TEAL, corner_radius=10
+            border_color=ACCENT_TEAL, corner_radius=8
         )
-        self.card_qc_focus.pack(fill="x", padx=4, pady=(0, 8))
+        self.card_qc_focus.pack(fill="x", padx=4, pady=(0, 6))
 
         qc_head = ctk.CTkFrame(self.card_qc_focus, fg_color="transparent")
-        qc_head.pack(fill="x", padx=12, pady=(8, 4))
+        qc_head.pack(fill="x", padx=10, pady=(6, 2))
 
         ctk.CTkLabel(
             qc_head, text="🎯  BẢNG KIỂM SOÁT LINH KIỆN CẦN CHÚ Ý (QC FOCUS CHECKLIST)",
-            font=("Segoe UI", 11, "bold"), text_color=ACCENT_TEAL
+            font=("Segoe UI", 10, "bold"), text_color=ACCENT_TEAL
         ).pack(side="left")
 
-        self.lbl_qc_progress = ctk.CTkLabel(
-            qc_head, text="Tiến độ kiểm tra FAI: 0 / 0 linh kiện (0%)",
-            font=("Segoe UI", 11, "bold"), text_color=ACCENT_AMBER
+        # Display Mode Segmented button
+        self.seg_display_mode = ctk.CTkSegmentedButton(
+            qc_head, values=["📋 Bảng Danh Mục", "📐 Bản Vẽ PCB", "◫ Song Song"],
+            height=24, corner_radius=6, font=("Segoe UI", 9, "bold"),
+            command=self._on_display_mode_change
         )
-        self.lbl_qc_progress.pack(side="right")
+        self.seg_display_mode.set("◫ Song Song")
+        self.seg_display_mode.pack(side="right", padx=(8, 0))
+
+        self.lbl_qc_progress = ctk.CTkLabel(
+            qc_head, text="Tiến độ kiểm tra FAI: 0 / 0 (0%)",
+            font=("Segoe UI", 10, "bold"), text_color=ACCENT_AMBER
+        )
+        self.lbl_qc_progress.pack(side="right", padx=10)
 
         qc_sub = ctk.CTkFrame(self.card_qc_focus, fg_color="transparent")
-        qc_sub.pack(fill="x", padx=12, pady=(0, 4))
+        qc_sub.pack(fill="x", padx=10, pady=(0, 3))
 
         ctk.CTkLabel(
-            qc_sub, text="⚡ QC chỉ cần kiểm tra các linh kiện khác biệt dưới đây khi đổi Series. Các linh kiện trùng khớp dùng chung không cần kiểm lại.",
-            font=("Segoe UI", 9, "italic"), text_color=TEXT_MUTED
+            qc_sub, text="⚡ Click vào dòng linh kiện để định vị trên bản vẽ PCB. Màu xanh: Thêm mới | Đỏ: Bỏ trống (DNP) | Vàng: Đổi mã.",
+            font=("Segoe UI", 8, "italic"), text_color=TEXT_MUTED
         ).pack(side="left")
 
         self.btn_mark_all_ok = ctk.CTkButton(
-            qc_sub, text="✓ Đánh dấu tất cả OK", font=("Segoe UI", 9, "bold"),
-            height=22, width=130, fg_color=ACCENT_TEAL, hover_color="#0D9488",
+            qc_sub, text="✓ Đánh dấu tất cả OK", font=("Segoe UI", 8, "bold"),
+            height=20, width=115, fg_color=ACCENT_TEAL, hover_color="#0D9488",
             command=self._mark_all_ok
         )
         self.btn_mark_all_ok.pack(side="right", padx=(4, 0))
 
         self.btn_reset_qc = ctk.CTkButton(
-            qc_sub, text="↺ Đặt lại kiểm tra", font=("Segoe UI", 9),
-            height=22, width=100, fg_color=BG_SURFACE, hover_color=BG_HOVER,
+            qc_sub, text="↺ Đặt lại", font=("Segoe UI", 8),
+            height=20, width=70, fg_color=BG_SURFACE, hover_color=BG_HOVER,
             text_color=TEXT_PRIMARY, command=self._reset_qc_checks
         )
         self.btn_reset_qc.pack(side="right")
 
         self.pbar_qc = ctk.CTkProgressBar(
-            self.card_qc_focus, height=8, corner_radius=4, progress_color=ACCENT_TEAL
+            self.card_qc_focus, height=6, corner_radius=3, progress_color=ACCENT_TEAL
         )
-        self.pbar_qc.pack(fill="x", padx=12, pady=(2, 8))
+        self.pbar_qc.pack(fill="x", padx=10, pady=(1, 6))
         self.pbar_qc.set(0)
 
-        # ── 4. FILTER & SEARCH BAR ───────────────────────────────────────────
-        filter_bar = ctk.CTkFrame(self, fg_color="transparent")
-        filter_bar.pack(fill="x", padx=4, pady=(0, 6))
+        # ── 4. MAIN SPLIT WORKSPACE: TABLE (LEFT) & DRAWING CANVAS (RIGHT) ───
+        self.split_workspace = ctk.CTkFrame(self, fg_color="transparent")
+        self.split_workspace.pack(fill="both", expand=True, padx=4, pady=(0, 2))
+
+        # ── LEFT PANEL: TABLE VIEW ───────────────────────────────────────────
+        self.table_panel = ctk.CTkFrame(self.split_workspace, fg_color="transparent")
+        self.table_panel.pack(side="left", fill="both", expand=True, padx=(0, 3))
+
+        # Filter Bar for table
+        tbl_filter_bar = ctk.CTkFrame(self.table_panel, fg_color="transparent")
+        tbl_filter_bar.pack(fill="x", pady=(0, 4))
 
         self.search_var = ctk.StringVar()
         self.search_entry = ctk.CTkEntry(
-            filter_bar, placeholder_text="🔍 Tìm kiếm vị trí (Ref Des), mã linh kiện...",
-            width=280, height=32, corner_radius=6, textvariable=self.search_var
+            tbl_filter_bar, placeholder_text="🔍 Tìm vị trí (Ref Des), mã LK...",
+            width=200, height=28, corner_radius=6, textvariable=self.search_var
         )
-        self.search_entry.pack(side="left", padx=(0, 8))
+        self.search_entry.pack(side="left", padx=(0, 4))
         self.search_entry.bind("<KeyRelease>", lambda e: self._populate_table())
 
         self.filter_var = ctk.StringVar(value="🎯 Cần chú ý (QC Focus)")
         self.seg_filter = ctk.CTkSegmentedButton(
-            filter_bar,
-            values=["🎯 Cần chú ý (QC Focus)", "🟢 Thêm mới", "🔴 Bỏ trống (DNP)", "🟡 Đổi mã", "⚪ Dùng chung", "Tất cả"],
-            variable=self.filter_var, height=32, corner_radius=6,
+            tbl_filter_bar,
+            values=["🎯 Cần chú ý", "🟢 Thêm", "🔴 Bớt", "🟡 Đổi", "⚪ Khớp", "Tất cả"],
+            variable=self.filter_var, height=28, corner_radius=6,
             command=lambda v: self._populate_table()
         )
-        self.seg_filter.pack(side="left", padx=4)
+        self.seg_filter.pack(side="left", fill="x", expand=True)
 
-        # ── 5. INTERACTIVE TABLE VIEW ─────────────────────────────────────────
-        table_container = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=8,
-                                       border_width=1, border_color=BORDER_CLR)
-        table_container.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+        table_box = ctk.CTkFrame(self.table_panel, fg_color=BG_CARD, corner_radius=8,
+                                 border_width=1, border_color=BORDER_CLR)
+        table_box.pack(fill="both", expand=True)
 
         cols = ("check", "loc", "status", "part_a", "part_b", "action", "spec")
-        self.tree = ttk.Treeview(table_container, columns=cols, show="headings", selectmode="browse")
+        self.tree = ttk.Treeview(table_box, columns=cols, show="headings", selectmode="browse")
 
         self.tree.heading("check", text="[QC Kiểm]")
         self.tree.heading("loc", text="Vị Trí (Ref)")
         self.tree.heading("status", text="Phân Loại")
         self.tree.heading("part_a", text="Mã LK (Series A)")
         self.tree.heading("part_b", text="Mã LK (Series B)")
-        self.tree.heading("action", text="Chỉ Dẫn Hành Động Cụ Thể Cho QC (Action Guide)")
-        self.tree.heading("spec", text="Quy Cách / Thông Số Kỹ Thuật (Series B)")
+        self.tree.heading("action", text="Chỉ Dẫn Hành Động Cho QC (Action Guide)")
+        self.tree.heading("spec", text="Quy Cách (Series B)")
 
-        self.tree.column("check", width=95, anchor="center")
-        self.tree.column("loc", width=95, anchor="center")
-        self.tree.column("status", width=120, anchor="center")
-        self.tree.column("part_a", width=145, anchor="w")
-        self.tree.column("part_b", width=145, anchor="w")
-        self.tree.column("action", width=380, anchor="w")
-        self.tree.column("spec", width=220, anchor="w")
+        self.tree.column("check", width=85, anchor="center")
+        self.tree.column("loc", width=75, anchor="center")
+        self.tree.column("status", width=105, anchor="center")
+        self.tree.column("part_a", width=125, anchor="w")
+        self.tree.column("part_b", width=125, anchor="w")
+        self.tree.column("action", width=300, anchor="w")
+        self.tree.column("spec", width=180, anchor="w")
 
-        vsb = ttk.Scrollbar(table_container, orient="vertical", command=self.tree.yview)
-        hsb = ttk.Scrollbar(table_container, orient="horizontal", command=self.tree.xview)
-        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        vsb_tbl = ttk.Scrollbar(table_box, orient="vertical", command=self.tree.yview)
+        hsb_tbl = ttk.Scrollbar(table_box, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=vsb_tbl.set, xscrollcommand=hsb_tbl.set)
 
         self.tree.pack(side="left", fill="both", expand=True)
-        vsb.pack(side="right", fill="y")
-        hsb.pack(side="bottom", fill="x")
+        vsb_tbl.pack(side="right", fill="y")
+        hsb_tbl.pack(side="bottom", fill="x")
 
-        # Color tags
         self._apply_tree_tags()
-
-        # Click event to toggle QC check status
         self.tree.bind("<ButtonRelease-1>", self._on_tree_click)
         self.tree.bind("<Double-1>", self._on_tree_double_click)
 
+        # ── RIGHT PANEL: PCB DRAWING CANVAS ──────────────────────────────────
+        self.drawing_panel = ctk.CTkFrame(self.split_workspace, fg_color=BG_CARD, corner_radius=8,
+                                         border_width=1, border_color=BORDER_CLR)
+        self.drawing_panel.pack(side="right", fill="both", expand=True, padx=(3, 0))
+
+        # Drawing Toolbar
+        dwg_toolbar = ctk.CTkFrame(self.drawing_panel, fg_color=BG_SURFACE, height=32, corner_radius=6)
+        dwg_toolbar.pack(fill="x", padx=6, pady=6)
+
+        ctk.CTkLabel(
+            dwg_toolbar, text="📐 BẢN VẼ PCB HIGHLIGHT", font=("Segoe UI", 10, "bold"),
+            text_color=ACCENT_TEAL
+        ).pack(side="left", padx=8)
+
+        # Zoom buttons
+        ctk.CTkButton(
+            dwg_toolbar, text="🔍 -", width=26, height=22, font=("Consolas", 10, "bold"),
+            fg_color=BG_CARD, hover_color=BG_HOVER, text_color=TEXT_PRIMARY,
+            command=self._zoom_out
+        ).pack(side="left", padx=2)
+
+        self.lbl_zoom = ctk.CTkLabel(dwg_toolbar, text="100%", font=("Segoe UI", 9, "bold"), width=42)
+        self.lbl_zoom.pack(side="left")
+
+        ctk.CTkButton(
+            dwg_toolbar, text="🔍 +", width=26, height=22, font=("Consolas", 10, "bold"),
+            fg_color=BG_CARD, hover_color=BG_HOVER, text_color=TEXT_PRIMARY,
+            command=self._zoom_in
+        ).pack(side="left", padx=2)
+
+        ctk.CTkButton(
+            dwg_toolbar, text="1:1", width=30, height=22, font=("Segoe UI", 8),
+            fg_color=BG_CARD, hover_color=BG_HOVER, text_color=TEXT_PRIMARY,
+            command=self._zoom_reset
+        ).pack(side="left", padx=2)
+
+        # Rotate button
+        self.btn_rotate_dwg = ctk.CTkButton(
+            dwg_toolbar, text="🔄 0°", width=50, height=22, font=("Segoe UI", 8, "bold"),
+            fg_color=BG_CARD, hover_color=BG_HOVER, text_color=TEXT_PRIMARY,
+            command=self._rotate_drawing
+        )
+        self.btn_rotate_dwg.pack(side="left", padx=4)
+
+        # Active location indicator badge
+        self.lbl_spotlight_badge = ctk.CTkLabel(
+            dwg_toolbar, text="📍 Chưa chọn linh kiện", font=("Segoe UI", 9, "bold"),
+            text_color=TEXT_MUTED
+        )
+        self.lbl_spotlight_badge.pack(side="left", padx=8)
+
+        # Fullscreen button
+        ctk.CTkButton(
+            dwg_toolbar, text="⛶ Toàn Màn Hình", width=105, height=22,
+            font=("Segoe UI", 9, "bold"), fg_color=ACCENT_BLUE, hover_color="#1E40AF",
+            command=self._open_fullscreen_drawing
+        ).pack(side="right", padx=6)
+
+        # Canvas Frame
+        canvas_box = ctk.CTkFrame(self.drawing_panel, fg_color="#0A0E18", corner_radius=6)
+        canvas_box.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+
+        self.canvas = tk.Canvas(
+            canvas_box, bg="#0A0E18", highlightthickness=0, cursor="hand2"
+        )
+        self.h_sb_dwg = ttk.Scrollbar(canvas_box, orient="horizontal", command=self.canvas.xview)
+        self.v_sb_dwg = ttk.Scrollbar(canvas_box, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(xscrollcommand=self.h_sb_dwg.set, yscrollcommand=self.v_sb_dwg.set)
+
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.v_sb_dwg.pack(side="right", fill="y")
+        self.h_sb_dwg.pack(side="bottom", fill="x")
+
+        # Canvas pan & zoom bindings
+        self.canvas.bind("<ButtonPress-1>", self._on_canvas_press)
+        self.canvas.bind("<B1-Motion>", self._on_canvas_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
+        self.canvas.bind("<MouseWheel>", self._on_canvas_mousewheel)
+
+    # ── THEME & VISUAL TAGS ──────────────────────────────────────────────────
     def _apply_tree_tags(self):
         is_dark = (self.app.current_theme == "dark")
         if is_dark:
@@ -4416,6 +4558,7 @@ class SeriesBOMCompareView(ctk.CTkFrame):
             self.tree.tag_configure("tag_matched", background="#FFFFFF", foreground="#212529")
             self.tree.tag_configure("tag_ok", background="#D4EFDF", foreground="#145A32")
 
+    # ── FILE SELECTION HANDLERS ──────────────────────────────────────────────
     def _select_file_a(self):
         f = filedialog.askopenfilename(
             title="Chọn file BOM Series A (Gốc)",
@@ -4446,30 +4589,142 @@ class SeriesBOMCompareView(ctk.CTkFrame):
         model, series = sbc.extract_model_and_series(os.path.basename(f))
         self.lbl_file_b_meta.configure(text=f"Model: {model} | Series: {series or 'Mới'}")
 
+    def _select_file_drawing(self):
+        f = filedialog.askopenfilename(
+            title="Chọn File Bản Vẽ Working Manual (PDF)",
+            filetypes=[("PDF Drawing Manual", "*.pdf"), ("Tất Cả Files", "*.*")]
+        )
+        if not f:
+            return
+        if os.path.getsize(f) > MAX_FILE_SIZE_BYTES:
+            messagebox.showwarning("File quá lớn", f"Bản vẽ '{os.path.basename(f)}' vượt quá 10MB!")
+            return
+        self.file_drawing = f
+        self.lbl_file_dwg_name.configure(text=f"{os.path.basename(f)} ({format_file_size(os.path.getsize(f))})")
+
+        # Load drawing pages info
+        try:
+            self.drawing_pages = sbc.get_drawing_pages_info(f)
+            if self.drawing_pages:
+                vals = [p["label"] for p in self.drawing_pages]
+                self.opt_dwg_page.configure(values=vals)
+                self.opt_dwg_page.set(vals[0])
+                self.drawing_page_idx = 0
+            self._render_drawing()
+        except Exception as e:
+            print(f"Error loading drawing pages: {e}")
+
+    def _on_drawing_page_selected(self, choice):
+        if not self.drawing_pages:
+            return
+        for p in self.drawing_pages:
+            if p["label"] == choice:
+                self.drawing_page_idx = p["index"]
+                break
+        self._render_drawing()
+
+    # ── HOLOGRAPHIC CYBERPUNK HUD LOADING CARD ───────────────────────────────
+    def _show_loading_hud(self, title: str = "VIPQC AI — SCANNING & LOCATING PCB COMPONENTS"):
+        self._hide_loading_hud()
+        is_dark = (self.app.current_theme == "dark")
+
+        self._loading_hud = ctk.CTkFrame(
+            self, fg_color="#080F1E" if is_dark else "#0F172A",
+            corner_radius=12, border_width=1.5, border_color="#00F0FF"
+        )
+        self._loading_hud.place(relx=0.5, rely=0.45, anchor="center")
+
+        hud_inner = ctk.CTkFrame(self._loading_hud, fg_color="transparent")
+        hud_inner.pack(padx=28, pady=20)
+
+        # Header Row
+        h_row = ctk.CTkFrame(hud_inner, fg_color="transparent")
+        h_row.pack(fill="x", pady=(0, 10))
+
+        ctk.CTkLabel(h_row, text="⚡", font=("Segoe UI", 16)).pack(side="left", padx=(0, 6))
+        ctk.CTkLabel(
+            h_row, text=title, font=("Segoe UI", 11, "bold"), text_color="#00F0FF"
+        ).pack(side="left", padx=(0, 14))
+        ctk.CTkLabel(
+            h_row, text="60 FPS • RADAR SCAN", font=("Consolas", 9, "bold"), text_color="#38BDF8"
+        ).pack(side="right")
+
+        # Progress Bar Row
+        p_row = ctk.CTkFrame(hud_inner, fg_color="transparent")
+        p_row.pack(fill="x", pady=(0, 10))
+
+        self.hud_pbar = ctk.CTkProgressBar(
+            p_row, width=380, height=10, corner_radius=5,
+            fg_color="#1E293B", progress_color="#00F0FF"
+        )
+        self.hud_pbar.set(0.1)
+        self.hud_pbar.pack(side="left", padx=(0, 10))
+
+        self.hud_lbl_pct = ctk.CTkLabel(
+            p_row, text="10%", font=("Consolas", 11, "bold"), text_color="#00F0FF", width=42
+        )
+        self.hud_lbl_pct.pack(side="left")
+
+        # Telemetry Phase Line
+        self.hud_lbl_telemetry = ctk.CTkLabel(
+            hud_inner, text="[PHASE 1/3] Đang bóc tách danh mục vật tư đa cấp BOM A & BOM B...",
+            font=("Consolas", 9), text_color="#94A3B8", anchor="w"
+        )
+        self.hud_lbl_telemetry.pack(fill="x")
+
+    def _update_loading_hud(self, pct: float, telemetry: str):
+        if not self._loading_hud:
+            return
+        self.hud_pbar.set(pct)
+        self.hud_lbl_pct.configure(text=f"{int(pct * 100)}%")
+        self.hud_lbl_telemetry.configure(text=telemetry)
+
+    def _hide_loading_hud(self):
+        if self._loading_hud:
+            try:
+                self._loading_hud.destroy()
+            except Exception:
+                pass
+            self._loading_hud = None
+
+    # ── COMPARE ENGINE EXECUTION ─────────────────────────────────────────────
     def _start_compare(self):
         if not self.file_a or not self.file_b:
             messagebox.showwarning("Thiếu file", "Vui lòng chọn đầy đủ 2 file BOM Series A và Series B!")
             return
 
         self.btn_run_compare.configure(state="disabled", text="⏳ Đang phân tích...")
-        self.lbl_validation.configure(text="⏳ Đang bóc tách dữ liệu và đối chiếu các vị trí linh kiện...", text_color=ACCENT_TEAL)
         self.is_comparing = True
+        self._show_loading_hud()
 
         threading.Thread(target=self._run_compare_thread, daemon=True).start()
 
     def _run_compare_thread(self):
         try:
+            time.sleep(0.3)
+            self.after(0, lambda: self._update_loading_hud(0.35, "[PHASE 1/3] Đang bóc tách dữ liệu 2 BOM..."))
+
             bom_a = sbc.parse_any_bom(self.file_a)
             bom_b = sbc.parse_any_bom(self.file_b)
+
+            time.sleep(0.3)
+            self.after(0, lambda: self._update_loading_hud(0.70, "[PHASE 2/3] So sánh vị trí linh kiện & phân loại FAI..."))
+
             res = sbc.compare_series_boms(bom_a, bom_b)
+
+            time.sleep(0.2)
+            self.after(0, lambda: self._update_loading_hud(0.95, "[PHASE 3/3] Quét bản vẽ PCB và vẽ khung viền Highlight..."))
+
+            time.sleep(0.3)
             self.after(0, lambda: self._on_compare_finished(res))
         except Exception as e:
             err_msg = str(e)
             self.after(0, lambda: self._on_compare_error(err_msg))
 
     def _on_compare_finished(self, result):
+        self._hide_loading_hud()
         self.comparison_result = result
-        self.btn_run_compare.configure(state="normal", text="⚡  SO SÁNH BOM")
+        self.btn_run_compare.configure(state="normal", text="⚡ SO SÁNH & ĐỊNH VỊ")
         self.btn_export_fai.configure(state="normal")
         self.is_comparing = False
 
@@ -4500,21 +4755,202 @@ class SeriesBOMCompareView(ctk.CTkFrame):
         self.tree.heading("part_b", text=f"Mã LK ({s_b})")
         self.tree.heading("spec", text=f"Quy Cách / Spec ({s_b})")
 
-        # Reset QC check statuses
         self.qc_status_map = {}
-
-        # Default filter to QC Focus items
-        self.filter_var.set("🎯 Cần chú ý (QC Focus)")
+        self.filter_var.set("🎯 Cần chú ý")
         self._populate_table()
+
+        # Render Drawing with Border Highlights
+        self._render_drawing()
 
         self.app.set_status(f"Hoàn thành so sánh 2 BOM! {s['focus_count']} linh kiện cần chú ý kiểm tra.")
 
     def _on_compare_error(self, err_msg):
-        self.btn_run_compare.configure(state="normal", text="⚡  SO SÁNH BOM")
+        self._hide_loading_hud()
+        self.btn_run_compare.configure(state="normal", text="⚡ SO SÁNH & ĐỊNH VỊ")
         self.is_comparing = False
         self.lbl_validation.configure(text=f"❌ Lỗi khi so sánh: {err_msg}", text_color="#FF5252")
         messagebox.showerror("Lỗi So Sánh", f"Đã xảy ra lỗi khi phân tích BOM:\n\n{err_msg}")
 
+    # ── DRAWING CANVAS & BORDER HIGHLIGHT RENDERING ──────────────────────────
+    def _render_drawing(self):
+        if not self.file_drawing or not os.path.exists(self.file_drawing):
+            self.canvas.delete("all")
+            self.canvas.create_text(
+                300, 200, text="Chưa tải file Bản vẽ Working Manual (PDF)\n\nNhấn '📐 Chọn Bản Vẽ' ở trên để xem bản vẽ PCB\nvới khung viền highlight linh kiện chênh lệch.",
+                fill="#64748B", font=("Segoe UI", 11, "bold"), justify="center"
+            )
+            return
+
+        focus_items = self.comparison_result.get("qc_focus_items", []) if self.comparison_result else []
+
+        img, coords_map = sbc.render_annotated_drawing_page(
+            self.file_drawing,
+            self.drawing_page_idx,
+            focus_items,
+            active_loc=self.active_loc,
+            zoom=self.zoom_level,
+            rotation=self.rotation_angle
+        )
+
+        if not img:
+            return
+
+        self.current_annotated_img = img
+        self.pixel_coords_map = coords_map
+
+        self.tk_canvas_img = ImageTk.PhotoImage(img)
+        self.canvas.delete("all")
+        self.canvas_img_id = self.canvas.create_image(0, 0, anchor="nw", image=self.tk_canvas_img)
+        self.canvas.configure(scrollregion=(0, 0, img.width, img.height))
+
+        # Center on active_loc if present
+        if self.active_loc and self.active_loc in self.pixel_coords_map:
+            x0, y0, x1, y1 = self.pixel_coords_map[self.active_loc]
+            cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+            # Scroll canvas to center (cx, cy)
+            cw = self.canvas.winfo_width() or 600
+            ch = self.canvas.winfo_height() or 400
+            fx = max(0.0, min(1.0, (cx - cw / 2) / img.width)) if img.width else 0.0
+            fy = max(0.0, min(1.0, (cy - ch / 2) / img.height)) if img.height else 0.0
+            self.canvas.xview_moveto(fx)
+            self.canvas.yview_moveto(fy)
+
+            self.lbl_spotlight_badge.configure(
+                text=f"📍 Tiêu điểm: {self.active_loc}", text_color="#00F0FF"
+            )
+
+    # ── DISPLAY MODE SWITCHING ───────────────────────────────────────────────
+    def _on_display_mode_change(self, mode_str):
+        if "Bảng" in mode_str:
+            self.display_mode = "table"
+            self.drawing_panel.pack_forget()
+            self.table_panel.pack(fill="both", expand=True)
+        elif "Bản Vẽ" in mode_str:
+            self.display_mode = "drawing"
+            self.table_panel.pack_forget()
+            self.drawing_panel.pack(fill="both", expand=True)
+            self._render_drawing()
+        else:
+            self.display_mode = "split"
+            self.table_panel.pack_forget()
+            self.drawing_panel.pack_forget()
+            self.table_panel.pack(side="left", fill="both", expand=True, padx=(0, 3))
+            self.drawing_panel.pack(side="right", fill="both", expand=True, padx=(3, 0))
+            self._render_drawing()
+
+    # ── DRAWING CONTROLS: ZOOM, PAN, ROTATE, FULLSCREEN ──────────────────────
+    def _zoom_in(self):
+        self.zoom_level = min(3.0, round(self.zoom_level + 0.2, 1))
+        self.lbl_zoom.configure(text=f"{int(self.zoom_level * 100)}%")
+        self._render_drawing()
+
+    def _zoom_out(self):
+        self.zoom_level = max(0.4, round(self.zoom_level - 0.2, 1))
+        self.lbl_zoom.configure(text=f"{int(self.zoom_level * 100)}%")
+        self._render_drawing()
+
+    def _zoom_reset(self):
+        self.zoom_level = 1.0
+        self.lbl_zoom.configure(text="100%")
+        self._render_drawing()
+
+    def _rotate_drawing(self):
+        self.rotation_angle = (self.rotation_angle + 90) % 360
+        self.btn_rotate_dwg.configure(text=f"🔄 {self.rotation_angle}°")
+        self._render_drawing()
+
+    def _on_canvas_press(self, event):
+        self.pan_start_x = event.x
+        self.pan_start_y = event.y
+
+    def _on_canvas_drag(self, event):
+        dx = event.x - self.pan_start_x
+        dy = event.y - self.pan_start_y
+        self.canvas.xview_scroll(-1 if dx > 0 else (1 if dx < 0 else 0), "units")
+        self.canvas.yview_scroll(-1 if dy > 0 else (1 if dy < 0 else 0), "units")
+        self.pan_start_x = event.x
+        self.pan_start_y = event.y
+
+    def _on_canvas_release(self, event):
+        # Check if clicked on a highlighted component box
+        canvas_x = self.canvas.canvasx(event.x)
+        canvas_y = self.canvas.canvasy(event.y)
+
+        for loc, (bx0, by0, bx1, by1) in self.pixel_coords_map.items():
+            if bx0 - 5 <= canvas_x <= bx1 + 5 and by0 - 5 <= canvas_y <= by1 + 5:
+                # Component clicked!
+                self.active_loc = loc
+                # Toggle QC status
+                curr = self.qc_status_map.get(loc, "PENDING")
+                self.qc_status_map[loc] = "OK" if curr != "OK" else "PENDING"
+                self._populate_table()
+                # Focus row in Treeview
+                if self.tree.exists(loc):
+                    self.tree.selection_set(loc)
+                    self.tree.see(loc)
+                self._render_drawing()
+                break
+
+    def _on_canvas_mousewheel(self, event):
+        if event.delta > 0:
+            self._zoom_in()
+        else:
+            self._zoom_out()
+
+    def _open_fullscreen_drawing(self):
+        if not self.file_drawing:
+            messagebox.showinfo("Chưa có bản vẽ", "Vui lòng chọn file Bản vẽ Working Manual trước!")
+            return
+
+        modal = ctk.CTkToplevel(self)
+        modal.title(f"VIPQC AI — TOÀN MÀN HÌNH BẢN VẼ PCB ({os.path.basename(self.file_drawing)})")
+        modal.geometry("1400x900")
+        modal.after(100, modal.lift)
+
+        # Fullscreen toolbar
+        f_tb = ctk.CTkFrame(modal, fg_color=BG_SURFACE, height=36)
+        f_tb.pack(fill="x", padx=8, pady=6)
+
+        ctk.CTkLabel(
+            f_tb, text="📐 BẢN VẼ PCB TOÀN MÀN HÌNH", font=("Segoe UI", 11, "bold"), text_color=ACCENT_TEAL
+        ).pack(side="left", padx=10)
+
+        # Zoom in fullscreen
+        ctk.CTkButton(
+            f_tb, text="🔍 -", width=30, height=24, command=self._zoom_out
+        ).pack(side="left", padx=4)
+        ctk.CTkButton(
+            f_tb, text="🔍 +", width=30, height=24, command=self._zoom_in
+        ).pack(side="left", padx=4)
+        ctk.CTkButton(
+            f_tb, text="🔄 Xoay", width=60, height=24, command=self._rotate_drawing
+        ).pack(side="left", padx=4)
+
+        ctk.CTkButton(
+            f_tb, text="✕ Đóng", width=70, height=24, fg_color="#E74C3C", command=modal.destroy
+        ).pack(side="right", padx=10)
+
+        # Fullscreen Canvas
+        f_canvas_frame = ctk.CTkFrame(modal, fg_color="#0A0E18")
+        f_canvas_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+        f_canvas = tk.Canvas(f_canvas_frame, bg="#0A0E18", highlightthickness=0)
+        f_vsb = ttk.Scrollbar(f_canvas_frame, orient="vertical", command=f_canvas.yview)
+        f_hsb = ttk.Scrollbar(f_canvas_frame, orient="horizontal", command=f_canvas.xview)
+        f_canvas.configure(xscrollcommand=f_hsb.set, yscrollcommand=f_vsb.set)
+
+        f_canvas.pack(side="left", fill="both", expand=True)
+        f_vsb.pack(side="right", fill="y")
+        f_hsb.pack(side="bottom", fill="x")
+
+        if self.current_annotated_img:
+            tk_img = ImageTk.PhotoImage(self.current_annotated_img)
+            f_canvas.create_image(0, 0, anchor="nw", image=tk_img)
+            f_canvas.configure(scrollregion=(0, 0, self.current_annotated_img.width, self.current_annotated_img.height))
+            # Keep reference to prevent GC
+            modal._tk_img_ref = tk_img
+
+    # ── TABLE POPULATION & INTERACTIVE ACTIONS ───────────────────────────────
     def _populate_table(self):
         self.tree.delete(*self.tree.get_children())
         if not self.comparison_result:
@@ -4525,13 +4961,13 @@ class SeriesBOMCompareView(ctk.CTkFrame):
 
         if "Cần chú ý" in fil:
             items = self.comparison_result["qc_focus_items"]
-        elif "Thêm mới" in fil:
+        elif "Thêm" in fil:
             items = self.comparison_result["added_items"]
-        elif "Bỏ trống" in fil:
+        elif "Bớt" in fil:
             items = self.comparison_result["removed_items"]
-        elif "Đổi mã" in fil:
+        elif "Đổi" in fil:
             items = self.comparison_result["modified_items"]
-        elif "Dùng chung" in fil:
+        elif "Khớp" in fil:
             items = self.comparison_result["matched_items"]
         else:
             items = self.comparison_result["all_items"]
@@ -4570,6 +5006,9 @@ class SeriesBOMCompareView(ctk.CTkFrame):
         if not item_id:
             return
 
+        # Set active spotlight on drawing
+        self.active_loc = item_id
+
         # Toggle QC check status
         current = self.qc_status_map.get(item_id, "PENDING")
         if current == "PENDING":
@@ -4581,18 +5020,19 @@ class SeriesBOMCompareView(ctk.CTkFrame):
 
         self._populate_table()
 
+        # Re-render / Spotlight on Drawing
+        self._render_drawing()
+
     def _on_tree_double_click(self, event):
         item_id = self.tree.identify_row(event.y)
         if not item_id or not self.comparison_result:
             return
 
-        # Find item record
         matched = [i for i in self.comparison_result["all_items"] if i["location"] == item_id]
         if not matched:
             return
         item = matched[0]
 
-        # Show detailed info popup
         msg = (
             f"VỊ TRÍ: {item['location']}\n"
             f"Trạng thái: {item['status_vn']}\n\n"
@@ -4656,7 +5096,6 @@ class SeriesBOMCompareView(ctk.CTkFrame):
             return
 
         try:
-            # Sync user's interactive check status into result items before exporting
             for item in self.comparison_result["all_items"]:
                 loc = item["location"]
                 if loc in self.qc_status_map:

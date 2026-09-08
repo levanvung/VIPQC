@@ -424,3 +424,237 @@ def compare_series_boms(bom_a_data: Dict[str, Any], bom_b_data: Dict[str, Any]) 
         "matched_items": matched_items,
         "all_items": all_comparison_rows
     }
+
+
+# ─── DRAWING INTEGRATION & BORDER HIGHLIGHT ENGINE ───────────────────────────
+from PIL import Image, ImageDraw, ImageFont
+
+
+def get_drawing_pages_info(pdf_path: str) -> List[Dict[str, Any]]:
+    """
+    Returns list of page info for a drawing PDF to populate page selection dropdown.
+    """
+    if not os.path.exists(pdf_path):
+        return []
+    doc = pymupdf.open(pdf_path)
+    pages = []
+    for idx, page in enumerate(doc):
+        text = page.get_text()
+        first_line = ""
+        for line in text.split("\n"):
+            line = line.strip()
+            if line and len(line) > 3:
+                first_line = line[:40]
+                break
+        label = f"Trang {idx + 1}"
+        if first_line:
+            label += f" — {first_line}"
+        pages.append({
+            "index": idx,
+            "label": label,
+            "width": page.rect.width,
+            "height": page.rect.height,
+            "rotation": page.rotation
+        })
+    return pages
+
+
+def locate_focus_items_on_drawing(doc: pymupdf.Document, page_idx: int, focus_items: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """
+    Locates exact bounding boxes for all QC Focus items on a drawing page (unrotated coordinates).
+    Returns mapping: loc -> {rects: [(x0, y0, x1, y1)...], item: dict}
+    """
+    if page_idx < 0 or page_idx >= len(doc):
+        return {}
+    page = doc[page_idx]
+
+    orig_rot = page.rotation
+    page.set_rotation(0)
+
+    # Pre-fetch all words on page
+    words = page.get_text("words")  # (x0, y0, x1, y1, word, block_no, line_no, word_no)
+    word_map = {}
+    for w in words:
+        clean_w = re.sub(r"[,\s;:\-_/]", "", w[4]).upper()
+        if clean_w:
+            word_map.setdefault(clean_w, []).append((w[0], w[1], w[2], w[3]))
+
+    located = {}
+    for item in focus_items:
+        loc = item.get("location", "").strip()
+        if not loc:
+            continue
+        clean_loc = re.sub(r"[,\s;:\-_/]", "", loc).upper()
+        rects = word_map.get(clean_loc, [])
+        if not rects:
+            # Fallback to search_for
+            raw_rects = page.search_for(loc)
+            rects = [(r.x0, r.y0, r.x1, r.y1) for r in raw_rects]
+
+        if rects:
+            located[loc] = {
+                "rects": rects,
+                "item": item
+            }
+
+    page.set_rotation(orig_rot)
+    return located
+
+
+def _transform_rect(rect: Tuple[float, float, float, float], page_w: float, page_h: float, zoom: float, rotation: int) -> Tuple[int, int, int, int]:
+    """
+    Transforms 72 DPI unrotated PDF rect to zoomed & rotated pixel bounding box.
+    """
+    x0, y0, x1, y1 = rect
+    z = zoom
+
+    if rotation == 90:
+        # Rotated 90 deg clockwise: new width is H, new height is W
+        px0 = int((page_h - y1) * z)
+        py0 = int(x0 * z)
+        px1 = int((page_h - y0) * z)
+        py1 = int(x1 * z)
+    elif rotation == 180:
+        # Rotated 180 deg
+        px0 = int((page_w - x1) * z)
+        py0 = int((page_h - y1) * z)
+        px1 = int((page_w - x0) * z)
+        py1 = int((page_h - y0) * z)
+    elif rotation == 270:
+        # Rotated 270 deg clockwise
+        px0 = int(y0 * z)
+        py0 = int((page_w - x1) * z)
+        px1 = int(y1 * z)
+        py1 = int((page_w - x0) * z)
+    else:
+        # No rotation (0 deg)
+        px0 = int(x0 * z)
+        py0 = int(y0 * z)
+        px1 = int(x1 * z)
+        py1 = int(y1 * z)
+
+    return (min(px0, px1), min(py0, py1), max(px0, px1), max(py0, py1))
+
+
+def render_annotated_drawing_page(
+    pdf_path: str,
+    page_idx: int,
+    focus_items: List[Dict[str, Any]],
+    active_loc: Optional[str] = None,
+    zoom: float = 1.2,
+    rotation: int = 0
+) -> Tuple[Optional[Image.Image], Dict[str, Tuple[int, int, int, int]]]:
+    """
+    Renders the PCB drawing page with multi-color border highlights for all focus items.
+    Highlights:
+      - 🟢 Green for ADDED
+      - 🔴 Red for REMOVED (DNP)
+      - 🟡 Amber for MODIFIED
+      - 🎯 Prominent Spotlight reticle for active_loc
+    Returns: (PIL.Image, pixel_coords_map)
+    """
+    if not os.path.exists(pdf_path):
+        return None, {}
+
+    doc = pymupdf.open(pdf_path)
+    if page_idx < 0 or page_idx >= len(doc):
+        doc.close()
+        return None, {}
+
+    page = doc[page_idx]
+    orig_rot = page.rotation
+    page.set_rotation(0)
+
+    page_w = page.rect.width
+    page_h = page.rect.height
+
+    # Render base image at zoom
+    mat = pymupdf.Matrix(zoom, zoom)
+    pix = page.get_pixmap(matrix=mat)
+    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+    # Apply image rotation if requested
+    if rotation == 90:
+        img = img.transpose(Image.Transpose.ROTATE_270)  # Clockwise 90
+    elif rotation == 180:
+        img = img.transpose(Image.Transpose.ROTATE_180)
+    elif rotation == 270:
+        img = img.transpose(Image.Transpose.ROTATE_90)   # Clockwise 270
+
+    # Locate focus items
+    located = locate_focus_items_on_drawing(doc, page_idx, focus_items)
+    page.set_rotation(orig_rot)
+    doc.close()
+
+    draw = ImageDraw.Draw(img)
+    pixel_coords_map = {}
+
+    # Color palette
+    color_map = {
+        "ADDED": "#00E676",      # Vivid green
+        "REMOVED": "#FF5252",    # Vivid red
+        "MODIFIED": "#FFAB00",   # Amber
+    }
+
+    # First pass: render all background highlight boxes
+    for loc, data in located.items():
+        item = data["item"]
+        status = item.get("status", "ADDED")
+        border_color = color_map.get(status, "#00E676")
+        is_active = (active_loc and active_loc.upper() == loc.upper())
+
+        for rect in data["rects"]:
+            px0, py0, px1, py1 = _transform_rect(rect, page_w, page_h, zoom, rotation)
+            # Add padding
+            pad = 6
+            b_x0, b_y0, b_x1, b_y1 = px0 - pad, py0 - pad, px1 + pad, py1 + pad
+
+            # Save in pixel map
+            pixel_coords_map[loc] = (b_x0, b_y0, b_x1, b_y1)
+
+            if not is_active:
+                # Draw outer glow + solid box
+                draw.rectangle([b_x0 - 2, b_y0 - 2, b_x1 + 2, b_y1 + 2], outline=border_color, width=3)
+                draw.rectangle([b_x0 + 1, b_y0 + 1, b_x1 - 1, b_y1 - 1], outline="#FFFFFF", width=1)
+
+                # Draw small badge tag
+                badge_w = max(50, len(loc) * 8 + 12)
+                badge_h = 16
+                draw.rectangle([b_x0, b_y0 - badge_h, b_x0 + badge_w, b_y0], fill="#0D1B2A")
+                draw.rectangle([b_x0, b_y0 - badge_h, b_x0 + badge_w, b_y0], outline=border_color, width=1)
+                draw.text((b_x0 + 4, b_y0 - badge_h + 2), f"{loc}", fill=border_color)
+
+    # Second pass: render active_loc spotlight with high prominence
+    if active_loc and active_loc in pixel_coords_map:
+        b_x0, b_y0, b_x1, b_y1 = pixel_coords_map[active_loc]
+        act_item = located[active_loc]["item"]
+        status = act_item.get("status", "ADDED")
+        spot_color = color_map.get(status, "#00E676")
+
+        # Large glowing halo box
+        for offset, alpha_col in [(6, "#00F0FF"), (4, spot_color), (2, "#FFFFFF")]:
+            draw.rectangle([b_x0 - offset, b_y0 - offset, b_x1 + offset, b_y1 + offset],
+                           outline=alpha_col, width=2)
+
+        # Crosshair corner brackets
+        corner_len = 16
+        # Top-left
+        draw.line([b_x0 - 10, b_y0 - 10, b_x0 - 10 + corner_len, b_y0 - 10], fill="#00F0FF", width=3)
+        draw.line([b_x0 - 10, b_y0 - 10, b_x0 - 10, b_y0 - 10 + corner_len], fill="#00F0FF", width=3)
+        # Top-right
+        draw.line([b_x1 + 10, b_y0 - 10, b_x1 + 10 - corner_len, b_y0 - 10], fill="#00F0FF", width=3)
+        draw.line([b_x1 + 10, b_y0 - 10, b_x1 + 10, b_y0 - 10 + corner_len], fill="#00F0FF", width=3)
+        # Bottom-left
+        draw.line([b_x0 - 10, b_y1 + 10, b_x0 - 10 + corner_len, b_y1 + 10], fill="#00F0FF", width=3)
+        draw.line([b_x0 - 10, b_y1 + 10, b_x0 - 10, b_y1 + 10 - corner_len], fill="#00F0FF", width=3)
+        # Bottom-right
+        draw.line([b_x1 + 10, b_y1 + 10, b_x1 + 10 - corner_len, b_y1 + 10], fill="#00F0FF", width=3)
+        draw.line([b_x1 + 10, b_y1 + 10, b_x1 + 10, b_y1 + 10 - corner_len], fill="#00F0FF", width=3)
+
+        # Callout banner
+        banner_txt = f"📍 {active_loc} | {act_item.get('status_vn', status)}"
+        draw.rectangle([b_x0 - 4, b_y0 - 26, b_x0 + 190, b_y0 - 4], fill="#0F172A")
+        draw.rectangle([b_x0 - 4, b_y0 - 26, b_x0 + 190, b_y0 - 4], outline="#00F0FF", width=2)
+        draw.text((b_x0 + 6, b_y0 - 22), banner_txt, fill="#00F0FF")
+
+    return img, pixel_coords_map
