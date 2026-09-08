@@ -57,6 +57,8 @@ def build():
         "--hidden-import", "bom_extractor",
         "--hidden-import", "excel_exporter",
         "--hidden-import", "model_comparator",
+        "--hidden-import", "series_bom_comparator",
+        "--hidden-import", "series_bom_exporter",
         "--hidden-import", "updater",
     ]
 
@@ -93,8 +95,11 @@ def build():
     if os.path.exists(exe_path):
         target_path = "VIPQC AI.exe"
         shutil.copy2(exe_path, target_path)
-        # Also maintain BOM_Extractor.exe for compatibility
-        shutil.copy2(exe_path, "BOM_Extractor.exe")
+        # Also maintain BOM_Extractor.exe for compatibility if not locked
+        try:
+            shutil.copy2(exe_path, "BOM_Extractor.exe")
+        except Exception as e:
+            print(f"Notice: Could not copy to BOM_Extractor.exe ({e})")
         shutil.rmtree("dist", ignore_errors=True)
         shutil.rmtree("build", ignore_errors=True)
         size_mb = os.path.getsize(target_path) / (1024 * 1024)

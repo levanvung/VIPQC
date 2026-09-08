@@ -1,8 +1,8 @@
 {
-  "version": "2.1.0",
+  "version": "2.2.0",
   "release_date": "2026-09-08",
-  "title": "VIPQC AI v2.1.0 — Bản Cập Nhật Tối Ưu & Tự Động Cập Nhật",
-  "changelog": "- Tự động kiểm tra tính hợp lệ Model & Series khi so sánh bản vẽ\n- Tự động nhận diện và gọt sạch hậu tố sản xuất MP, PP, (1)\n- Khắc phục triệt để lỗi không kéo được bản vẽ sang trái và phóng to 500%\n- Tích hợp động cơ kiểm tra và tự động cập nhật phiên bản mới qua GitHub",
+  "title": "VIPQC AI v2.2.0 — Tính Năng So Sánh 2 BOM & Bảng Kiểm Soát QC (FAI)",
+  "changelog": "- Tích hợp Tab 4: So Sánh 2 BOM cùng Model khác Series (Hỗ trợ PDF ERP & Excel)\n- Tự động bóc tách danh mục linh kiện đa cấp và phân loại chênh lệch (Thêm mới, Bỏ trống DNP, Đổi mã)\n- Tính năng QC Focus Checklist: Chỉ dẫn hành động kiểm tra cụ thể và tích chọn tương tác\n- Xuất Biên bản kiểm tra FAI (First Article Inspection) chuyên nghiệp cho QC & SMT",
   "download_url": "https://github.com/levanvung/VIPQC/raw/master/VIPQC%20AI.exe",
   "release_url": "https://github.com/levanvung/VIPQC"
 }

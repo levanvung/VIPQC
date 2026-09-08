@@ -49,6 +49,8 @@ from model_comparator import (
     get_annotated_base_images, extract_model_info,
     validate_model_pair
 )
+import series_bom_comparator as sbc
+import series_bom_exporter as sbe
 
 def resource_path(relative_path: str) -> str:
     """Get absolute path to resource, works for dev and for PyInstaller bundle."""
@@ -226,6 +228,7 @@ I18N = {
             "diff": "Chi Tiết Sai LỆch"
         },
         "tab_model_comp": "🔀 So Sánh 2 Model",
+        "tab_series_bom": "📑 So Sánh 2 BOM",
         "card_model_a_title": "1. MODEL A (BẢN GỐC / SERIES 1)",
         "card_model_b_title": "2. MODEL B (BẢN MỚI / SERIES 2)",
         "btn_choose_model_a": "📄 Chọn PDF Model A",
@@ -381,6 +384,7 @@ I18N = {
             "diff": "差异详情"
         },
         "tab_model_comp": "🔀 机型图纸比对",
+        "tab_series_bom": "📑 BOM系列比对",
         "card_model_a_title": "1. 机型 A (基准 / 系列 1)",
         "card_model_b_title": "2. 机型 B (变更 / 系列 2)",
         "btn_choose_model_a": "📄 选择机型 A (PDF)",
@@ -533,6 +537,7 @@ I18N = {
             "diff": "Discrepancy Details"
         },
         "tab_model_comp": "🔀 Model Series Diff",
+        "tab_series_bom": "📑 Series BOM Diff",
         "card_model_a_title": "1. MODEL A (BASE / SERIES 1)",
         "card_model_b_title": "2. MODEL B (NEW / SERIES 2)",
         "btn_choose_model_a": "📄 Choose Model A PDF",
@@ -4142,6 +4147,534 @@ class ModelCompareView(ctk.CTkFrame):
             self.tree.heading(cid, text=hdr_text)
 
 
+
+# ─── SERIES BOM COMPARE VIEW (TAB 4) ─────────────────────────────────────────
+class SeriesBOMCompareView(ctk.CTkFrame):
+    """
+    Dedicated view for comparing 2 BOMs of the same model across different series.
+    Supports ERP Multi-level BOM PDFs and Excel BOMs.
+    Features the QC Focus Checklist for fast, targeted First Article Inspection (FAI).
+    """
+    def __init__(self, parent, app):
+        super().__init__(parent, fg_color="transparent")
+        self.app = app
+
+        self.file_a = None
+        self.file_b = None
+        self.bom_a_data = None
+        self.bom_b_data = None
+        self.comparison_result = None
+        self.filter_mode = "focus"
+        self.search_query = ""
+        self.is_comparing = False
+        self.qc_status_map = {}  # loc -> 'OK', 'NG', 'PENDING'
+
+        self._build_ui()
+
+    def t(self, key: str, **kwargs) -> str:
+        return self.app.t(key, **kwargs)
+
+    def _build_ui(self):
+        # ── 1. TOP CARDS: FILE UPLOAD & CONTROLS ─────────────────────────────
+        top_container = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=12,
+                                     border_width=1, border_color=BORDER_CLR)
+        top_container.pack(fill="x", padx=4, pady=(4, 8))
+
+        inner_top = ctk.CTkFrame(top_container, fg_color="transparent")
+        inner_top.pack(fill="x", padx=12, pady=10)
+
+        # Left Card: Series A
+        self.card_a = ctk.CTkFrame(inner_top, fg_color=BG_SURFACE, corner_radius=8,
+                                   border_width=1, border_color=BORDER_CLR)
+        self.card_a.pack(side="left", fill="both", expand=True, padx=(0, 6))
+
+        a_header = ctk.CTkFrame(self.card_a, fg_color="transparent")
+        a_header.pack(fill="x", padx=8, pady=(8, 2))
+        ctk.CTkLabel(a_header, text="1. BOM GỐC (SERIES A / CŨ)", font=("Segoe UI", 11, "bold"),
+                     text_color=ACCENT_BLUE).pack(side="left")
+
+        self.btn_select_a = ctk.CTkButton(
+            a_header, text="📂 Chọn File (.pdf/.xlsx)", font=("Segoe UI", 10, "bold"),
+            height=28, width=130, fg_color=ACCENT_BLUE, hover_color="#1E40AF",
+            command=self._select_file_a
+        )
+        self.btn_select_a.pack(side="right")
+
+        self.lbl_file_a_name = ctk.CTkLabel(
+            self.card_a, text="Chưa chọn file (Kéo thả hoặc nhấn nút chọn)",
+            font=("Segoe UI", 10), text_color=TEXT_MUTED, anchor="w"
+        )
+        self.lbl_file_a_name.pack(fill="x", padx=8, pady=(2, 2))
+
+        self.lbl_file_a_meta = ctk.CTkLabel(
+            self.card_a, text="Model: — | Series: —", font=("Segoe UI", 9, "bold"),
+            text_color=ACCENT_TEAL, anchor="w"
+        )
+        self.lbl_file_a_meta.pack(fill="x", padx=8, pady=(0, 6))
+
+        # Right Card: Series B
+        self.card_b = ctk.CTkFrame(inner_top, fg_color=BG_SURFACE, corner_radius=8,
+                                   border_width=1, border_color=BORDER_CLR)
+        self.card_b.pack(side="left", fill="both", expand=True, padx=(6, 6))
+
+        b_header = ctk.CTkFrame(self.card_b, fg_color="transparent")
+        b_header.pack(fill="x", padx=8, pady=(8, 2))
+        ctk.CTkLabel(b_header, text="2. BOM SO SÁNH (SERIES B / MỚI)", font=("Segoe UI", 11, "bold"),
+                     text_color=ACCENT_TEAL).pack(side="left")
+
+        self.btn_select_b = ctk.CTkButton(
+            b_header, text="📂 Chọn File (.pdf/.xlsx)", font=("Segoe UI", 10, "bold"),
+            height=28, width=130, fg_color=ACCENT_TEAL, hover_color="#0D9488",
+            command=self._select_file_b
+        )
+        self.btn_select_b.pack(side="right")
+
+        self.lbl_file_b_name = ctk.CTkLabel(
+            self.card_b, text="Chưa chọn file (Kéo thả hoặc nhấn nút chọn)",
+            font=("Segoe UI", 10), text_color=TEXT_MUTED, anchor="w"
+        )
+        self.lbl_file_b_name.pack(fill="x", padx=8, pady=(2, 2))
+
+        self.lbl_file_b_meta = ctk.CTkLabel(
+            self.card_b, text="Model: — | Series: —", font=("Segoe UI", 9, "bold"),
+            text_color=ACCENT_TEAL, anchor="w"
+        )
+        self.lbl_file_b_meta.pack(fill="x", padx=8, pady=(0, 6))
+
+        # Right Action Buttons
+        act_box = ctk.CTkFrame(inner_top, fg_color="transparent")
+        act_box.pack(side="right", fill="y", padx=(6, 0))
+
+        self.btn_run_compare = ctk.CTkButton(
+            act_box, text="⚡  SO SÁNH BOM", font=("Segoe UI", 12, "bold"),
+            height=38, width=150, fg_color=ACCENT_TEAL, hover_color="#0F766E",
+            command=self._start_compare
+        )
+        self.btn_run_compare.pack(fill="x", pady=(2, 4))
+
+        self.btn_export_fai = ctk.CTkButton(
+            act_box, text="📥 Xuất Báo Cáo FAI", font=("Segoe UI", 10, "bold"),
+            height=28, width=150, fg_color="#1E3A8A", hover_color="#1E40AF",
+            state="disabled", command=self._export_excel
+        )
+        self.btn_export_fai.pack(fill="x", pady=(2, 0))
+
+        # ── 2. VALIDATION BANNER & STATS ──────────────────────────────────────
+        self.banner_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.banner_frame.pack(fill="x", padx=4, pady=(0, 6))
+
+        self.lbl_validation = ctk.CTkLabel(
+            self.banner_frame, text="💡 Vui lòng chọn 2 file BOM (PDF hoặc Excel) rồi nhấn '⚡ SO SÁNH BOM'.",
+            font=("Segoe UI", 10, "italic"), text_color=TEXT_MUTED, anchor="w"
+        )
+        self.lbl_validation.pack(fill="x", padx=4)
+
+        self.stats_container = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=8,
+                                           border_width=1, border_color=BORDER_CLR)
+        self.stats_container.pack(fill="x", padx=4, pady=(0, 8))
+
+        self.kpi_boxes = {}
+        kpi_defs = [
+            ("total", "🔵 TỔNG VỊ TRÍ", "0", "#3D8EFF"),
+            ("matched", "⚪ DÙNG CHUNG", "0 (0%)", "#9E9E9E"),
+            ("added", "🟢 THÊM MỚI", "0", "#00E676"),
+            ("removed", "🔴 BỎ TRỐNG (DNP)", "0", "#FF5252"),
+            ("modified", "🟡 ĐỔI MÃ VẬT TƯ", "0", "#FFAB00"),
+            ("focus", "🎯 CẦN KIỂM (QC FOCUS)", "0", "#00C9A7")
+        ]
+
+        for k_id, k_title, k_val, k_col in kpi_defs:
+            f = ctk.CTkFrame(self.stats_container, fg_color=BG_SURFACE, corner_radius=6)
+            f.pack(side="left", fill="both", expand=True, padx=4, pady=6)
+            lbl_t = ctk.CTkLabel(f, text=k_title, font=("Segoe UI", 9, "bold"), text_color=TEXT_MUTED)
+            lbl_t.pack(pady=(4, 0))
+            lbl_v = ctk.CTkLabel(f, text=k_val, font=("Segoe UI", 12, "bold"), text_color=k_col)
+            lbl_v.pack(pady=(0, 4))
+            self.kpi_boxes[k_id] = (lbl_t, lbl_v, k_col)
+
+        # ── 3. QC FOCUS CHECKLIST HERO CARD ───────────────────────────────────
+        self.card_qc_focus = ctk.CTkFrame(
+            self, fg_color=("#F0FDFA", "#13232C"), border_width=1.5,
+            border_color=ACCENT_TEAL, corner_radius=10
+        )
+        self.card_qc_focus.pack(fill="x", padx=4, pady=(0, 8))
+
+        qc_head = ctk.CTkFrame(self.card_qc_focus, fg_color="transparent")
+        qc_head.pack(fill="x", padx=12, pady=(8, 4))
+
+        ctk.CTkLabel(
+            qc_head, text="🎯  BẢNG KIỂM SOÁT LINH KIỆN CẦN CHÚ Ý (QC FOCUS CHECKLIST)",
+            font=("Segoe UI", 11, "bold"), text_color=ACCENT_TEAL
+        ).pack(side="left")
+
+        self.lbl_qc_progress = ctk.CTkLabel(
+            qc_head, text="Tiến độ kiểm tra FAI: 0 / 0 linh kiện (0%)",
+            font=("Segoe UI", 11, "bold"), text_color=ACCENT_AMBER
+        )
+        self.lbl_qc_progress.pack(side="right")
+
+        qc_sub = ctk.CTkFrame(self.card_qc_focus, fg_color="transparent")
+        qc_sub.pack(fill="x", padx=12, pady=(0, 4))
+
+        ctk.CTkLabel(
+            qc_sub, text="⚡ QC chỉ cần kiểm tra các linh kiện khác biệt dưới đây khi đổi Series. Các linh kiện trùng khớp dùng chung không cần kiểm lại.",
+            font=("Segoe UI", 9, "italic"), text_color=TEXT_MUTED
+        ).pack(side="left")
+
+        self.btn_mark_all_ok = ctk.CTkButton(
+            qc_sub, text="✓ Đánh dấu tất cả OK", font=("Segoe UI", 9, "bold"),
+            height=22, width=130, fg_color=ACCENT_TEAL, hover_color="#0D9488",
+            command=self._mark_all_ok
+        )
+        self.btn_mark_all_ok.pack(side="right", padx=(4, 0))
+
+        self.btn_reset_qc = ctk.CTkButton(
+            qc_sub, text="↺ Đặt lại kiểm tra", font=("Segoe UI", 9),
+            height=22, width=100, fg_color=BG_SURFACE, hover_color=BG_HOVER,
+            text_color=TEXT_PRIMARY, command=self._reset_qc_checks
+        )
+        self.btn_reset_qc.pack(side="right")
+
+        self.pbar_qc = ctk.CTkProgressBar(
+            self.card_qc_focus, height=8, corner_radius=4, progress_color=ACCENT_TEAL
+        )
+        self.pbar_qc.pack(fill="x", padx=12, pady=(2, 8))
+        self.pbar_qc.set(0)
+
+        # ── 4. FILTER & SEARCH BAR ───────────────────────────────────────────
+        filter_bar = ctk.CTkFrame(self, fg_color="transparent")
+        filter_bar.pack(fill="x", padx=4, pady=(0, 6))
+
+        self.search_var = ctk.StringVar()
+        self.search_entry = ctk.CTkEntry(
+            filter_bar, placeholder_text="🔍 Tìm kiếm vị trí (Ref Des), mã linh kiện...",
+            width=280, height=32, corner_radius=6, textvariable=self.search_var
+        )
+        self.search_entry.pack(side="left", padx=(0, 8))
+        self.search_entry.bind("<KeyRelease>", lambda e: self._populate_table())
+
+        self.filter_var = ctk.StringVar(value="🎯 Cần chú ý (QC Focus)")
+        self.seg_filter = ctk.CTkSegmentedButton(
+            filter_bar,
+            values=["🎯 Cần chú ý (QC Focus)", "🟢 Thêm mới", "🔴 Bỏ trống (DNP)", "🟡 Đổi mã", "⚪ Dùng chung", "Tất cả"],
+            variable=self.filter_var, height=32, corner_radius=6,
+            command=lambda v: self._populate_table()
+        )
+        self.seg_filter.pack(side="left", padx=4)
+
+        # ── 5. INTERACTIVE TABLE VIEW ─────────────────────────────────────────
+        table_container = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=8,
+                                       border_width=1, border_color=BORDER_CLR)
+        table_container.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+
+        cols = ("check", "loc", "status", "part_a", "part_b", "action", "spec")
+        self.tree = ttk.Treeview(table_container, columns=cols, show="headings", selectmode="browse")
+
+        self.tree.heading("check", text="[QC Kiểm]")
+        self.tree.heading("loc", text="Vị Trí (Ref)")
+        self.tree.heading("status", text="Phân Loại")
+        self.tree.heading("part_a", text="Mã LK (Series A)")
+        self.tree.heading("part_b", text="Mã LK (Series B)")
+        self.tree.heading("action", text="Chỉ Dẫn Hành Động Cụ Thể Cho QC (Action Guide)")
+        self.tree.heading("spec", text="Quy Cách / Thông Số Kỹ Thuật (Series B)")
+
+        self.tree.column("check", width=95, anchor="center")
+        self.tree.column("loc", width=95, anchor="center")
+        self.tree.column("status", width=120, anchor="center")
+        self.tree.column("part_a", width=145, anchor="w")
+        self.tree.column("part_b", width=145, anchor="w")
+        self.tree.column("action", width=380, anchor="w")
+        self.tree.column("spec", width=220, anchor="w")
+
+        vsb = ttk.Scrollbar(table_container, orient="vertical", command=self.tree.yview)
+        hsb = ttk.Scrollbar(table_container, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+        self.tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        hsb.pack(side="bottom", fill="x")
+
+        # Color tags
+        self._apply_tree_tags()
+
+        # Click event to toggle QC check status
+        self.tree.bind("<ButtonRelease-1>", self._on_tree_click)
+        self.tree.bind("<Double-1>", self._on_tree_double_click)
+
+    def _apply_tree_tags(self):
+        is_dark = (self.app.current_theme == "dark")
+        if is_dark:
+            self.tree.tag_configure("tag_added", background="#15362B", foreground="#00E676")
+            self.tree.tag_configure("tag_removed", background="#361818", foreground="#FF5252")
+            self.tree.tag_configure("tag_modified", background="#362E15", foreground="#FFAB00")
+            self.tree.tag_configure("tag_matched", background="#131929", foreground="#7A8BA6")
+            self.tree.tag_configure("tag_ok", background="#0E3D2F", foreground="#A3E4D7")
+        else:
+            self.tree.tag_configure("tag_added", background="#E8F8F5", foreground="#0E6251")
+            self.tree.tag_configure("tag_removed", background="#FDEDEC", foreground="#78281F")
+            self.tree.tag_configure("tag_modified", background="#FEF9E7", foreground="#7D6608")
+            self.tree.tag_configure("tag_matched", background="#FFFFFF", foreground="#212529")
+            self.tree.tag_configure("tag_ok", background="#D4EFDF", foreground="#145A32")
+
+    def _select_file_a(self):
+        f = filedialog.askopenfilename(
+            title="Chọn file BOM Series A (Gốc)",
+            filetypes=[("BOM Files", "*.pdf;*.xlsx;*.xls"), ("PDF Files", "*.pdf"), ("Excel Files", "*.xlsx;*.xls")]
+        )
+        if not f:
+            return
+        if os.path.getsize(f) > MAX_FILE_SIZE_BYTES:
+            messagebox.showwarning("File quá lớn", f"File '{os.path.basename(f)}' vượt quá 10MB!")
+            return
+        self.file_a = f
+        self.lbl_file_a_name.configure(text=f"{os.path.basename(f)} ({format_file_size(os.path.getsize(f))})")
+        model, series = sbc.extract_model_and_series(os.path.basename(f))
+        self.lbl_file_a_meta.configure(text=f"Model: {model} | Series: {series or 'Gốc'}")
+
+    def _select_file_b(self):
+        f = filedialog.askopenfilename(
+            title="Chọn file BOM Series B (So sánh)",
+            filetypes=[("BOM Files", "*.pdf;*.xlsx;*.xls"), ("PDF Files", "*.pdf"), ("Excel Files", "*.xlsx;*.xls")]
+        )
+        if not f:
+            return
+        if os.path.getsize(f) > MAX_FILE_SIZE_BYTES:
+            messagebox.showwarning("File quá lớn", f"File '{os.path.basename(f)}' vượt quá 10MB!")
+            return
+        self.file_b = f
+        self.lbl_file_b_name.configure(text=f"{os.path.basename(f)} ({format_file_size(os.path.getsize(f))})")
+        model, series = sbc.extract_model_and_series(os.path.basename(f))
+        self.lbl_file_b_meta.configure(text=f"Model: {model} | Series: {series or 'Mới'}")
+
+    def _start_compare(self):
+        if not self.file_a or not self.file_b:
+            messagebox.showwarning("Thiếu file", "Vui lòng chọn đầy đủ 2 file BOM Series A và Series B!")
+            return
+
+        self.btn_run_compare.configure(state="disabled", text="⏳ Đang phân tích...")
+        self.lbl_validation.configure(text="⏳ Đang bóc tách dữ liệu và đối chiếu các vị trí linh kiện...", text_color=ACCENT_TEAL)
+        self.is_comparing = True
+
+        threading.Thread(target=self._run_compare_thread, daemon=True).start()
+
+    def _run_compare_thread(self):
+        try:
+            bom_a = sbc.parse_any_bom(self.file_a)
+            bom_b = sbc.parse_any_bom(self.file_b)
+            res = sbc.compare_series_boms(bom_a, bom_b)
+            self.after(0, lambda: self._on_compare_finished(res))
+        except Exception as e:
+            err_msg = str(e)
+            self.after(0, lambda: self._on_compare_error(err_msg))
+
+    def _on_compare_finished(self, result):
+        self.comparison_result = result
+        self.btn_run_compare.configure(state="normal", text="⚡  SO SÁNH BOM")
+        self.btn_export_fai.configure(state="normal")
+        self.is_comparing = False
+
+        s = result["summary"]
+        v_stat = s["validation_status"]
+        v_msg = s["validation_msg"]
+
+        if v_stat == "VALID":
+            self.lbl_validation.configure(
+                text=f"✅ {v_msg} (Model: {s['model_b']} | Series {s['series_a']} ➔ {s['series_b']})",
+                text_color="#00E676"
+            )
+        else:
+            self.lbl_validation.configure(text=f"⚠️ {v_msg}", text_color=ACCENT_AMBER)
+
+        # Update KPI badges
+        self.kpi_boxes["total"][1].configure(text=str(s["total_locations"]))
+        self.kpi_boxes["matched"][1].configure(text=f"{s['matched_count']} ({s['match_percentage']}%)")
+        self.kpi_boxes["added"][1].configure(text=str(s["added_count"]))
+        self.kpi_boxes["removed"][1].configure(text=str(s["removed_count"]))
+        self.kpi_boxes["modified"][1].configure(text=str(s["modified_count"]))
+        self.kpi_boxes["focus"][1].configure(text=str(s["focus_count"]))
+
+        # Update Series headings
+        s_a = s["series_a"] or "A"
+        s_b = s["series_b"] or "B"
+        self.tree.heading("part_a", text=f"Mã LK ({s_a})")
+        self.tree.heading("part_b", text=f"Mã LK ({s_b})")
+        self.tree.heading("spec", text=f"Quy Cách / Spec ({s_b})")
+
+        # Reset QC check statuses
+        self.qc_status_map = {}
+
+        # Default filter to QC Focus items
+        self.filter_var.set("🎯 Cần chú ý (QC Focus)")
+        self._populate_table()
+
+        self.app.set_status(f"Hoàn thành so sánh 2 BOM! {s['focus_count']} linh kiện cần chú ý kiểm tra.")
+
+    def _on_compare_error(self, err_msg):
+        self.btn_run_compare.configure(state="normal", text="⚡  SO SÁNH BOM")
+        self.is_comparing = False
+        self.lbl_validation.configure(text=f"❌ Lỗi khi so sánh: {err_msg}", text_color="#FF5252")
+        messagebox.showerror("Lỗi So Sánh", f"Đã xảy ra lỗi khi phân tích BOM:\n\n{err_msg}")
+
+    def _populate_table(self):
+        self.tree.delete(*self.tree.get_children())
+        if not self.comparison_result:
+            return
+
+        fil = self.filter_var.get()
+        query = self.search_var.get().strip().upper()
+
+        if "Cần chú ý" in fil:
+            items = self.comparison_result["qc_focus_items"]
+        elif "Thêm mới" in fil:
+            items = self.comparison_result["added_items"]
+        elif "Bỏ trống" in fil:
+            items = self.comparison_result["removed_items"]
+        elif "Đổi mã" in fil:
+            items = self.comparison_result["modified_items"]
+        elif "Dùng chung" in fil:
+            items = self.comparison_result["matched_items"]
+        else:
+            items = self.comparison_result["all_items"]
+
+        for item in items:
+            loc = item["location"]
+            if query and (query not in loc.upper() and query not in item["part_a"].upper() and query not in item["part_b"].upper()):
+                continue
+
+            status = item["status"]
+            qc_st = self.qc_status_map.get(loc, "PENDING")
+            if qc_st == "OK":
+                check_display = "✅ ĐÃ DUYỆT"
+                tag = "tag_ok"
+            elif qc_st == "NG":
+                check_display = "❌ LỖI (NG)"
+                tag = "tag_removed"
+            else:
+                check_display = "⏳ Chờ kiểm"
+                tag = f"tag_{status.lower()}"
+
+            self.tree.insert("", "end", iid=loc, values=(
+                check_display,
+                loc,
+                item["status_vn"],
+                item["part_a"],
+                item["part_b"],
+                item["action_guide"],
+                item["spec_b"] or item["spec_a"]
+            ), tags=(tag,))
+
+        self._update_progress()
+
+    def _on_tree_click(self, event):
+        item_id = self.tree.identify_row(event.y)
+        if not item_id:
+            return
+
+        # Toggle QC check status
+        current = self.qc_status_map.get(item_id, "PENDING")
+        if current == "PENDING":
+            self.qc_status_map[item_id] = "OK"
+        elif current == "OK":
+            self.qc_status_map[item_id] = "NG"
+        else:
+            self.qc_status_map[item_id] = "PENDING"
+
+        self._populate_table()
+
+    def _on_tree_double_click(self, event):
+        item_id = self.tree.identify_row(event.y)
+        if not item_id or not self.comparison_result:
+            return
+
+        # Find item record
+        matched = [i for i in self.comparison_result["all_items"] if i["location"] == item_id]
+        if not matched:
+            return
+        item = matched[0]
+
+        # Show detailed info popup
+        msg = (
+            f"VỊ TRÍ: {item['location']}\n"
+            f"Trạng thái: {item['status_vn']}\n\n"
+            f"Mã linh kiện Series A: {item['part_a']}\n"
+            f"Mã linh kiện Series B: {item['part_b']}\n\n"
+            f"HƯỚNG DẪN KIỂM TRA QC:\n{item['action_guide']}\n\n"
+            f"Thông số kỹ thuật: {item['spec_b'] or item['spec_a']}"
+        )
+        messagebox.showinfo(f"Chi Tiết Linh Kiện {item_id}", msg)
+
+    def _update_progress(self):
+        if not self.comparison_result:
+            self.lbl_qc_progress.configure(text="Tiến độ kiểm tra FAI: 0 / 0 (0%)")
+            self.pbar_qc.set(0)
+            return
+
+        focus_items = self.comparison_result["qc_focus_items"]
+        total = len(focus_items)
+        if total == 0:
+            self.lbl_qc_progress.configure(text="✅ Không có linh kiện khác biệt cần kiểm!")
+            self.pbar_qc.set(1.0)
+            return
+
+        focus_locs = [i["location"] for i in focus_items]
+        checked = sum(1 for loc in focus_locs if self.qc_status_map.get(loc) == "OK")
+        pct = int(checked / total * 100)
+        self.lbl_qc_progress.configure(text=f"Tiến độ kiểm tra FAI: {checked} / {total} linh kiện ({pct}%)")
+        self.pbar_qc.set(checked / total)
+
+    def _mark_all_ok(self):
+        if not self.comparison_result:
+            return
+        for item in self.comparison_result["qc_focus_items"]:
+            self.qc_status_map[item["location"]] = "OK"
+        self._populate_table()
+
+    def _reset_qc_checks(self):
+        if not self.comparison_result:
+            return
+        self.qc_status_map = {}
+        self._populate_table()
+
+    def _export_excel(self):
+        if not self.comparison_result:
+            return
+
+        s = self.comparison_result["summary"]
+        model = s.get("model_b") or s.get("model_a") or "BOM"
+        s_a = s.get("series_a") or "A"
+        s_b = s.get("series_b") or "B"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_name = f"FAI_Checklist_{model}_{s_a}_vs_{s_b}_{timestamp}.xlsx"
+
+        out_path = filedialog.asksaveasfilename(
+            title="Lưu Biên Bản Kiểm Tra FAI & So Sánh BOM",
+            defaultextension=".xlsx",
+            initialfile=default_name,
+            filetypes=[("Excel Workbook", "*.xlsx")]
+        )
+        if not out_path:
+            return
+
+        try:
+            # Sync user's interactive check status into result items before exporting
+            for item in self.comparison_result["all_items"]:
+                loc = item["location"]
+                if loc in self.qc_status_map:
+                    item["qc_status"] = self.qc_status_map[loc]
+
+            sbe.export_series_bom_report(self.comparison_result, out_path)
+            self.app.set_status(f"Đã xuất biên bản FAI thành công: {os.path.basename(out_path)}")
+
+            resp = messagebox.askyesno(
+                "Xuất Thành Công",
+                f"Đã tạo file báo cáo FAI thành công tại:\n{out_path}\n\nBạn có muốn mở file ngay không?"
+            )
+            if resp:
+                os.startfile(out_path)
+        except Exception as e:
+            messagebox.showerror("Lỗi Xuất File", f"Không thể xuất file Excel:\n\n{str(e)}")
+
+
 class BOMExtractorApp(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -4356,6 +4889,10 @@ class BOMExtractorApp(ctk.CTk):
         self.view_model_compare = ModelCompareView(self.main_container, self)
         # (Initially hidden, shown when nav changes to Model Compare)
 
+        # ── TAB 4: SERIES BOM COMPARE VIEW ────────────────────────────────────
+        self.view_series_bom_compare = SeriesBOMCompareView(self.main_container, self)
+        # (Initially hidden, shown when nav changes to Series BOM Compare)
+
         # === BOTTOM STATUS BAR ================================================
         status_bar = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=0, height=34)
         status_bar.pack(fill="x", side="bottom")
@@ -4425,7 +4962,21 @@ class BOMExtractorApp(ctk.CTk):
             hover_color=BG_HOVER,
             command=lambda: self._set_nav_active("model_comp")
         )
-        self.btn_nav_model_comp.pack(fill="x", padx=10, pady=(0, 10))
+        self.btn_nav_model_comp.pack(fill="x", padx=10, pady=(0, 6))
+
+        self.btn_nav_series_bom = ctk.CTkButton(
+            parent,
+            text=self.t("tab_series_bom"),
+            font=("Segoe UI", 11, "bold"),
+            height=44,
+            corner_radius=8,
+            anchor="w",
+            fg_color="transparent",
+            text_color=TEXT_PRIMARY,
+            hover_color=BG_HOVER,
+            command=lambda: self._set_nav_active("series_bom")
+        )
+        self.btn_nav_series_bom.pack(fill="x", padx=10, pady=(0, 10))
 
         # Subtle divider
         ctk.CTkFrame(parent, fg_color=BORDER_CLR, height=1).pack(fill="x", padx=10, pady=4)
@@ -4819,6 +5370,8 @@ class BOMExtractorApp(ctk.CTk):
             self.view_compare.apply_theme(is_dark)
         if hasattr(self, "view_model_compare"):
             self.view_model_compare.apply_theme(is_dark)
+        if hasattr(self, "view_series_bom_compare"):
+            self.view_series_bom_compare._apply_tree_tags()
 
         # Sidebar & Copyright theme
         if hasattr(self, "sidebar"):
@@ -4888,8 +5441,12 @@ class BOMExtractorApp(ctk.CTk):
             self.btn_nav_compare.configure(fg_color=inactive_fg, text_color=inactive_txt, hover_color=hover_col)
             if hasattr(self, "btn_nav_model_comp"):
                 self.btn_nav_model_comp.configure(fg_color=inactive_fg, text_color=inactive_txt, hover_color=hover_col)
+            if hasattr(self, "btn_nav_series_bom"):
+                self.btn_nav_series_bom.configure(fg_color=inactive_fg, text_color=inactive_txt, hover_color=hover_col)
             if hasattr(self, "view_model_compare"):
                 self.view_model_compare.pack_forget()
+            if hasattr(self, "view_series_bom_compare"):
+                self.view_series_bom_compare.pack_forget()
             self.view_compare.pack_forget()
             self.view_extract.pack(fill="both", expand=True)
             self._update_badges_for_extract()
@@ -4899,8 +5456,12 @@ class BOMExtractorApp(ctk.CTk):
             self.btn_nav_extract.configure(fg_color=inactive_fg, text_color=inactive_txt, hover_color=hover_col)
             if hasattr(self, "btn_nav_model_comp"):
                 self.btn_nav_model_comp.configure(fg_color=inactive_fg, text_color=inactive_txt, hover_color=hover_col)
+            if hasattr(self, "btn_nav_series_bom"):
+                self.btn_nav_series_bom.configure(fg_color=inactive_fg, text_color=inactive_txt, hover_color=hover_col)
             if hasattr(self, "view_model_compare"):
                 self.view_model_compare.pack_forget()
+            if hasattr(self, "view_series_bom_compare"):
+                self.view_series_bom_compare.pack_forget()
             self.view_extract.pack_forget()
             self.view_compare.pack(fill="both", expand=True)
             self._update_badges_for_compare()
@@ -4910,12 +5471,30 @@ class BOMExtractorApp(ctk.CTk):
             self.btn_nav_compare.configure(fg_color=inactive_fg, text_color=inactive_txt, hover_color=hover_col)
             if hasattr(self, "btn_nav_model_comp"):
                 self.btn_nav_model_comp.configure(fg_color=active_fg, text_color=active_txt, hover_color=("#0F766E", "#00A88C"))
+            if hasattr(self, "btn_nav_series_bom"):
+                self.btn_nav_series_bom.configure(fg_color=inactive_fg, text_color=inactive_txt, hover_color=hover_col)
             self.view_extract.pack_forget()
             self.view_compare.pack_forget()
+            if hasattr(self, "view_series_bom_compare"):
+                self.view_series_bom_compare.pack_forget()
             if hasattr(self, "view_model_compare"):
                 self.view_model_compare.pack(fill="both", expand=True)
             self._update_badges_for_model_compare()
             self.set_status("Đã chuyển sang chế độ So Sánh 2 Model & Bản Vẽ PCB.")
+        elif mode == "series_bom":
+            self.btn_nav_extract.configure(fg_color=inactive_fg, text_color=inactive_txt, hover_color=hover_col)
+            self.btn_nav_compare.configure(fg_color=inactive_fg, text_color=inactive_txt, hover_color=hover_col)
+            if hasattr(self, "btn_nav_model_comp"):
+                self.btn_nav_model_comp.configure(fg_color=inactive_fg, text_color=inactive_txt, hover_color=hover_col)
+            if hasattr(self, "btn_nav_series_bom"):
+                self.btn_nav_series_bom.configure(fg_color=active_fg, text_color=active_txt, hover_color=("#0F766E", "#00A88C"))
+            self.view_extract.pack_forget()
+            self.view_compare.pack_forget()
+            if hasattr(self, "view_model_compare"):
+                self.view_model_compare.pack_forget()
+            if hasattr(self, "view_series_bom_compare"):
+                self.view_series_bom_compare.pack(fill="both", expand=True)
+            self.set_status("Đã chuyển sang chế độ So Sánh 2 BOM (Series).")
 
     def _on_nav_change(self, choice: str):
         """Compatibility method for switching navigation."""
@@ -4994,6 +5573,8 @@ class BOMExtractorApp(ctk.CTk):
             self.btn_nav_compare.configure(text=self.t("tab_compare"))
         if hasattr(self, "btn_nav_model_comp"):
             self.btn_nav_model_comp.configure(text=self.t("tab_model_comp"))
+        if hasattr(self, "btn_nav_series_bom"):
+            self.btn_nav_series_bom.configure(text=self.t("tab_series_bom"))
         if hasattr(self, "lbl_sidebar_c_badge"):
             self.lbl_sidebar_c_badge.configure(text="🛡️  " + self.t("copyright_title") + "  🛡️")
         if hasattr(self, "lbl_sidebar_author"):

@@ -13,7 +13,7 @@ import subprocess
 import urllib.request
 import urllib.error
 
-CURRENT_VERSION = "2.1.0"
+CURRENT_VERSION = "2.2.0"
 GITHUB_OWNER = "levanvung"
 GITHUB_REPO = "VIPQC"
 
