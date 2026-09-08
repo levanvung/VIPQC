@@ -501,39 +501,96 @@ def locate_focus_items_on_drawing(doc: pymupdf.Document, page_idx: int, focus_it
     return located
 
 
-def _transform_rect(rect: Tuple[float, float, float, float], page_w: float, page_h: float, zoom: float, rotation: int) -> Tuple[int, int, int, int]:
+def extract_drawing_model_info(pdf_path: str) -> Dict[str, Any]:
     """
-    Transforms 72 DPI unrotated PDF rect to zoomed & rotated pixel bounding box.
+    Extracts Model identification and specifications from a Working Manual drawing PDF.
+    Extracts PWB part code, Process code, Model text, and candidate model numbers.
     """
-    x0, y0, x1, y1 = rect
-    z = zoom
+    if not os.path.exists(pdf_path):
+        return {}
 
-    if rotation == 90:
-        # Rotated 90 deg clockwise: new width is H, new height is W
-        px0 = int((page_h - y1) * z)
-        py0 = int(x0 * z)
-        px1 = int((page_h - y0) * z)
-        py1 = int(x1 * z)
-    elif rotation == 180:
-        # Rotated 180 deg
-        px0 = int((page_w - x1) * z)
-        py0 = int((page_h - y1) * z)
-        px1 = int((page_w - x0) * z)
-        py1 = int((page_h - y0) * z)
-    elif rotation == 270:
-        # Rotated 270 deg clockwise
-        px0 = int(y0 * z)
-        py0 = int((page_w - x1) * z)
-        px1 = int(y1 * z)
-        py1 = int((page_w - x0) * z)
-    else:
-        # No rotation (0 deg)
-        px0 = int(x0 * z)
-        py0 = int(y0 * z)
-        px1 = int(x1 * z)
-        py1 = int(y1 * z)
+    doc = pymupdf.open(pdf_path)
+    all_text = ""
+    for i in range(min(4, len(doc))):
+        all_text += " " + doc[i].get_text()
+    doc.close()
 
-    return (min(px0, px1), min(py0, py1), max(px0, px1), max(py0, py1))
+    fn = os.path.basename(pdf_path)
+
+    # 1. PWB Part Code
+    m_pwb = re.search(r'\b(PV-QPWB[A-Z0-9\-]+|QPWB[A-Z0-9\-]+)\b', all_text, re.IGNORECASE)
+    pwb = m_pwb.group(1).strip().upper() if m_pwb else ""
+
+    # 2. Process Code (e.g. CHP3280TRM-1A, CHA3072AR-2A)
+    m_proc = re.search(r'PROCESS\s*CODE[\s:\-_]*([A-Z0-9\-]+)', all_text, re.IGNORECASE)
+    proc = m_proc.group(1).strip().upper() if m_proc else ""
+
+    # 3. Model Text
+    m_mod = re.search(r'MODEL[\s:\-_]*([A-Z0-9\-/\s]+?)(?:PROCESS|REVISION|PAGE|PWB|\n|$)', all_text, re.IGNORECASE)
+    model_txt = ""
+    if m_mod:
+        c_m = m_mod.group(1).strip()
+        if len(c_m) > 2 and not c_m.startswith(('RECORD', 'CODE', 'CAV')):
+            model_txt = c_m
+
+    # 4. Candidate Model Strings
+    candidates = re.findall(r'\b(?:CH[AP]\d+[A-Z0-9\-]*|CAR\d+[A-Z0-9\-]*|RAD\d+[A-Z0-9\-]*|QPWB[A-Z0-9\-]+|PV-QPWB[A-Z0-9\-]+)\b', all_text, re.IGNORECASE)
+    cleaned_candidates = []
+    for c in candidates:
+        cu = c.strip().upper()
+        if cu and cu not in cleaned_candidates and len(cu) >= 4:
+            cleaned_candidates.append(cu)
+
+    display_model = proc or pwb or model_txt or (cleaned_candidates[0] if cleaned_candidates else os.path.splitext(fn)[0])
+
+    return {
+        "display_model": display_model,
+        "pwb_code": pwb,
+        "process_code": proc,
+        "model_text": model_txt,
+        "candidates": cleaned_candidates[:10],
+        "filename": fn
+    }
+
+
+def validate_drawing_against_bom(pdf_path: str, bom_model: str) -> Tuple[bool, str, Dict[str, Any]]:
+    """
+    Validates that the uploaded PCB Drawing PDF matches the Model being compared.
+    Prevents uploading mismatched drawings.
+    Returns: (is_valid: bool, reason_msg: str, dwg_info: dict)
+    """
+    if not os.path.exists(pdf_path):
+        return False, "File bản vẽ không tồn tại trên hệ thống.", {}
+
+    dwg_info = extract_drawing_model_info(pdf_path)
+
+    if not bom_model or not bom_model.strip():
+        # BOM model not determined yet, allow upload
+        return True, "Chưa xác định Model BOM để đối chiếu.", dwg_info
+
+    bom_clean = re.sub(r'[^A-Z0-9]', '', bom_model.upper())
+    m_digits = re.search(r'\d{3,5}', bom_clean)
+    bom_digits = m_digits.group(0) if m_digits else bom_clean
+
+    fn = dwg_info.get("filename", "")
+    candidates_str = " ".join(dwg_info.get("candidates", []))
+    pwb = dwg_info.get("pwb_code", "")
+    proc = dwg_info.get("process_code", "")
+    mod_txt = dwg_info.get("model_text", "")
+
+    haystack = f"{fn} {candidates_str} {pwb} {proc} {mod_txt}".upper()
+
+    # If numeric core or full base model is in drawing metadata
+    if bom_digits and bom_digits in haystack:
+        return True, f"Bản vẽ khớp Model {bom_model}.", dwg_info
+
+    if bom_clean and bom_clean in haystack:
+        return True, f"Bản vẽ khớp Model {bom_model}.", dwg_info
+
+    # Drawing belongs to a different model
+    other_model = proc or pwb or mod_txt or (dwg_info.get("candidates", ["Khác"])[0])
+    msg = f"Bản vẽ là Model '{other_model}' nhưng danh mục BOM đang so sánh Model '{bom_model}'."
+    return False, msg, dwg_info
 
 
 def render_annotated_drawing_page(
@@ -541,11 +598,12 @@ def render_annotated_drawing_page(
     page_idx: int,
     focus_items: List[Dict[str, Any]],
     active_loc: Optional[str] = None,
-    zoom: float = 1.2,
+    zoom: float = 1.0,
     rotation: int = 0
 ) -> Tuple[Optional[Image.Image], Dict[str, Tuple[int, int, int, int]]]:
     """
     Renders the PCB drawing page with multi-color border highlights for all focus items.
+    Uses native PyMuPDF page rotation and rotation_matrix for 100% mathematical accuracy.
     Highlights:
       - 🟢 Green for ADDED
       - 🔴 Red for REMOVED (DNP)
@@ -562,27 +620,22 @@ def render_annotated_drawing_page(
         return None, {}
 
     page = doc[page_idx]
-    orig_rot = page.rotation
-    page.set_rotation(0)
+    orig_rot = page.rotation  # PDF native orientation (e.g. 90 deg for landscape drawings)
 
-    page_w = page.rect.width
-    page_h = page.rect.height
+    # Set page rotation combining native orientation and user additional rotation
+    effective_rot = (orig_rot + rotation) % 360
+    page.set_rotation(effective_rot)
 
-    # Render base image at zoom
+    # Render base image directly with PyMuPDF
     mat = pymupdf.Matrix(zoom, zoom)
     pix = page.get_pixmap(matrix=mat)
     img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
-    # Apply image rotation if requested
-    if rotation == 90:
-        img = img.transpose(Image.Transpose.ROTATE_270)  # Clockwise 90
-    elif rotation == 180:
-        img = img.transpose(Image.Transpose.ROTATE_180)
-    elif rotation == 270:
-        img = img.transpose(Image.Transpose.ROTATE_90)   # Clockwise 270
-
-    # Locate focus items
+    # Locate focus items using unrotated raw coordinates
     located = locate_focus_items_on_drawing(doc, page_idx, focus_items)
+    rot_mat = page.rotation_matrix
+
+    # Restore native rotation before closing
     page.set_rotation(orig_rot)
     doc.close()
 
@@ -601,13 +654,21 @@ def render_annotated_drawing_page(
         item = data["item"]
         status = item.get("status", "ADDED")
         border_color = color_map.get(status, "#00E676")
-        is_active = (active_loc and active_loc.upper() == loc.upper())
+        is_active = bool(active_loc and active_loc.upper() == loc.upper())
 
         for rect in data["rects"]:
-            px0, py0, px1, py1 = _transform_rect(rect, page_w, page_h, zoom, rotation)
+            r = pymupdf.Rect(rect[0], rect[1], rect[2], rect[3])
+            r_vis = r * rot_mat
+
+            px0 = int(min(r_vis.x0, r_vis.x1) * zoom)
+            py0 = int(min(r_vis.y0, r_vis.y1) * zoom)
+            px1 = int(max(r_vis.x0, r_vis.x1) * zoom)
+            py1 = int(max(r_vis.y0, r_vis.y1) * zoom)
+
             # Add padding
             pad = 6
-            b_x0, b_y0, b_x1, b_y1 = px0 - pad, py0 - pad, px1 + pad, py1 + pad
+            b_x0, b_y0 = max(0, px0 - pad), max(0, py0 - pad)
+            b_x1, b_y1 = min(img.width - 1, px1 + pad), min(img.height - 1, py1 + pad)
 
             # Save in pixel map
             pixel_coords_map[loc] = (b_x0, b_y0, b_x1, b_y1)
@@ -620,9 +681,10 @@ def render_annotated_drawing_page(
                 # Draw small badge tag
                 badge_w = max(50, len(loc) * 8 + 12)
                 badge_h = 16
-                draw.rectangle([b_x0, b_y0 - badge_h, b_x0 + badge_w, b_y0], fill="#0D1B2A")
-                draw.rectangle([b_x0, b_y0 - badge_h, b_x0 + badge_w, b_y0], outline=border_color, width=1)
-                draw.text((b_x0 + 4, b_y0 - badge_h + 2), f"{loc}", fill=border_color)
+                by_tag = max(0, b_y0 - badge_h)
+                draw.rectangle([b_x0, by_tag, b_x0 + badge_w, by_tag + badge_h], fill="#0D1B2A")
+                draw.rectangle([b_x0, by_tag, b_x0 + badge_w, by_tag + badge_h], outline=border_color, width=1)
+                draw.text((b_x0 + 4, by_tag + 1), f"{loc}", fill=border_color)
 
     # Second pass: render active_loc spotlight with high prominence
     if active_loc and active_loc in pixel_coords_map:
@@ -633,8 +695,10 @@ def render_annotated_drawing_page(
 
         # Large glowing halo box
         for offset, alpha_col in [(6, "#00F0FF"), (4, spot_color), (2, "#FFFFFF")]:
-            draw.rectangle([b_x0 - offset, b_y0 - offset, b_x1 + offset, b_y1 + offset],
-                           outline=alpha_col, width=2)
+            draw.rectangle(
+                [max(0, b_x0 - offset), max(0, b_y0 - offset), min(img.width - 1, b_x1 + offset), min(img.height - 1, b_y1 + offset)],
+                outline=alpha_col, width=2
+            )
 
         # Crosshair corner brackets
         corner_len = 16
@@ -653,8 +717,9 @@ def render_annotated_drawing_page(
 
         # Callout banner
         banner_txt = f"📍 {active_loc} | {act_item.get('status_vn', status)}"
-        draw.rectangle([b_x0 - 4, b_y0 - 26, b_x0 + 190, b_y0 - 4], fill="#0F172A")
-        draw.rectangle([b_x0 - 4, b_y0 - 26, b_x0 + 190, b_y0 - 4], outline="#00F0FF", width=2)
-        draw.text((b_x0 + 6, b_y0 - 22), banner_txt, fill="#00F0FF")
+        draw.rectangle([b_x0 - 4, max(0, b_y0 - 26), b_x0 + 190, max(0, b_y0 - 4)], fill="#0F172A")
+        draw.rectangle([b_x0 - 4, max(0, b_y0 - 26), b_x0 + 190, max(0, b_y0 - 4)], outline="#00F0FF", width=2)
+        draw.text((b_x0 + 6, max(0, b_y0 - 22)), banner_txt, fill="#00F0FF")
 
     return img, pixel_coords_map
+

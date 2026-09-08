@@ -4558,7 +4558,41 @@ class SeriesBOMCompareView(ctk.CTkFrame):
             self.tree.tag_configure("tag_matched", background="#FFFFFF", foreground="#212529")
             self.tree.tag_configure("tag_ok", background="#D4EFDF", foreground="#145A32")
 
-    # ── FILE SELECTION HANDLERS ──────────────────────────────────────────────
+    # ── FILE SELECTION & MODEL VALIDATION HANDLERS ───────────────────────────
+    def _get_current_bom_model(self) -> str:
+        """Returns the base model of the current BOMs (e.g. 'CHA3259AF')."""
+        if self.comparison_result and self.comparison_result.get("summary"):
+            s = self.comparison_result["summary"]
+            m = s.get("model_b") or s.get("model_a")
+            if m:
+                return m
+        if self.file_b:
+            mod, _ = sbc.extract_model_and_series(os.path.basename(self.file_b))
+            if mod:
+                return mod
+        if self.file_a:
+            mod, _ = sbc.extract_model_and_series(os.path.basename(self.file_a))
+            if mod:
+                return mod
+        return ""
+
+    def _reset_drawing(self):
+        """Clears the loaded drawing and resets canvas to empty notice."""
+        self.file_drawing = None
+        self.drawing_pages = []
+        self.drawing_page_idx = 0
+        self.current_annotated_img = None
+        self.pixel_coords_map = {}
+        self.lbl_file_dwg_name.configure(text="Chưa chọn bản vẽ")
+        self.lbl_file_dwg_meta.configure(text="PDF Working Manual (PCB)", text_color=TEXT_MUTED)
+        self.opt_dwg_page.configure(values=["Trang 1"])
+        self.opt_dwg_page.set("Trang 1")
+        self.canvas.delete("all")
+        self.canvas.create_text(
+            300, 200, text="Chưa tải file Bản vẽ Working Manual (PDF)\n\nNhấn '📐 Chọn Bản Vẽ' ở trên để xem bản vẽ PCB\nvới khung viền highlight linh kiện chênh lệch.",
+            fill="#64748B", font=("Segoe UI", 11, "bold"), justify="center"
+        )
+
     def _select_file_a(self):
         f = filedialog.askopenfilename(
             title="Chọn file BOM Series A (Gốc)",
@@ -4573,6 +4607,18 @@ class SeriesBOMCompareView(ctk.CTkFrame):
         self.lbl_file_a_name.configure(text=f"{os.path.basename(f)} ({format_file_size(os.path.getsize(f))})")
         model, series = sbc.extract_model_and_series(os.path.basename(f))
         self.lbl_file_a_meta.configure(text=f"Model: {model} | Series: {series or 'Gốc'}")
+
+        # If drawing is already loaded, verify that drawing matches the new BOM model
+        if self.file_drawing:
+            cur_bom_mod = self._get_current_bom_model()
+            is_valid, msg, dinfo = sbc.validate_drawing_against_bom(self.file_drawing, cur_bom_mod)
+            if not is_valid:
+                messagebox.showwarning(
+                    "Bản Vẽ Không Khớp BOM Mới",
+                    f"⚠️ Bản vẽ '{os.path.basename(self.file_drawing)}' đã chọn trước đó không thuộc Model '{cur_bom_mod}'.\n\n"
+                    f"Hệ thống sẽ đặt lại file bản vẽ. Vui lòng chọn bản vẽ đúng của Model {cur_bom_mod}."
+                )
+                self._reset_drawing()
 
     def _select_file_b(self):
         f = filedialog.askopenfilename(
@@ -4589,6 +4635,18 @@ class SeriesBOMCompareView(ctk.CTkFrame):
         model, series = sbc.extract_model_and_series(os.path.basename(f))
         self.lbl_file_b_meta.configure(text=f"Model: {model} | Series: {series or 'Mới'}")
 
+        # If drawing is already loaded, verify that drawing matches the new BOM model
+        if self.file_drawing:
+            cur_bom_mod = self._get_current_bom_model()
+            is_valid, msg, dinfo = sbc.validate_drawing_against_bom(self.file_drawing, cur_bom_mod)
+            if not is_valid:
+                messagebox.showwarning(
+                    "Bản Vẽ Không Khớp BOM Mới",
+                    f"⚠️ Bản vẽ '{os.path.basename(self.file_drawing)}' đã chọn trước đó không thuộc Model '{cur_bom_mod}'.\n\n"
+                    f"Hệ thống sẽ đặt lại file bản vẽ. Vui lòng chọn bản vẽ đúng của Model {cur_bom_mod}."
+                )
+                self._reset_drawing()
+
     def _select_file_drawing(self):
         f = filedialog.askopenfilename(
             title="Chọn File Bản Vẽ Working Manual (PDF)",
@@ -4599,8 +4657,30 @@ class SeriesBOMCompareView(ctk.CTkFrame):
         if os.path.getsize(f) > MAX_FILE_SIZE_BYTES:
             messagebox.showwarning("File quá lớn", f"Bản vẽ '{os.path.basename(f)}' vượt quá 10MB!")
             return
+
+        bom_model = self._get_current_bom_model()
+        is_valid, val_msg, dwg_info = sbc.validate_drawing_against_bom(f, bom_model)
+
+        if not is_valid:
+            dwg_disp = dwg_info.get("display_model", "Không xác định")
+            messagebox.showerror(
+                "Bản Vẽ Không Khớp Model",
+                f"❌ Bản vẽ không khớp với Model cần so sánh!\n\n"
+                f"• Model của BOM: {bom_model or '(Chưa chọn BOM)'}\n"
+                f"• Model trên Bản vẽ: {dwg_disp}\n"
+                f"• Chi tiết: {val_msg}\n"
+                f"• File bản vẽ: {os.path.basename(f)}\n\n"
+                f"Vui lòng tải lên đúng file bản vẽ Working Manual của Model {bom_model}!"
+            )
+            return
+
         self.file_drawing = f
         self.lbl_file_dwg_name.configure(text=f"{os.path.basename(f)} ({format_file_size(os.path.getsize(f))})")
+        dwg_mod = dwg_info.get("display_model", "")
+        self.lbl_file_dwg_meta.configure(
+            text=f"✓ Model: {dwg_mod or bom_model} (Hợp lệ)",
+            text_color="#00E676"
+        )
 
         # Load drawing pages info
         try:
@@ -4692,6 +4772,20 @@ class SeriesBOMCompareView(ctk.CTkFrame):
         if not self.file_a or not self.file_b:
             messagebox.showwarning("Thiếu file", "Vui lòng chọn đầy đủ 2 file BOM Series A và Series B!")
             return
+
+        # Validate drawing if user selected one
+        if self.file_drawing:
+            cur_bom_mod = self._get_current_bom_model()
+            is_valid, msg, dinfo = sbc.validate_drawing_against_bom(self.file_drawing, cur_bom_mod)
+            if not is_valid:
+                messagebox.showerror(
+                    "Bản Vẽ Không Khớp Model",
+                    f"❌ Bản vẽ không khớp với Model cần so sánh!\n\n"
+                    f"• Model BOM: {cur_bom_mod}\n"
+                    f"• Model Bản vẽ: {dinfo.get('display_model', 'Không xác định')}\n\n"
+                    f"Vui lòng tải lên đúng file bản vẽ Working Manual của Model {cur_bom_mod} trước khi so sánh!"
+                )
+                return
 
         self.btn_run_compare.configure(state="disabled", text="⏳ Đang phân tích...")
         self.is_comparing = True
@@ -4798,26 +4892,46 @@ class SeriesBOMCompareView(ctk.CTkFrame):
         self.current_annotated_img = img
         self.pixel_coords_map = coords_map
 
+        cw = max(200, self.canvas.winfo_width())
+        ch = max(200, self.canvas.winfo_height())
+        draw_x0 = max(0, (cw - img.width) // 2) if img.width < cw else 0
+        draw_y0 = max(0, (ch - img.height) // 2) if img.height < ch else 0
+        self.draw_offset_x = draw_x0
+        self.draw_offset_y = draw_y0
+
         self.tk_canvas_img = ImageTk.PhotoImage(img)
         self.canvas.delete("all")
-        self.canvas_img_id = self.canvas.create_image(0, 0, anchor="nw", image=self.tk_canvas_img)
-        self.canvas.configure(scrollregion=(0, 0, img.width, img.height))
+        self.canvas_img_id = self.canvas.create_image(draw_x0, draw_y0, anchor="nw", image=self.tk_canvas_img)
+        max_w = max(cw, img.width + draw_x0)
+        max_h = max(ch, img.height + draw_y0)
+        self.canvas.configure(scrollregion=(0, 0, max_w, max_h))
 
         # Center on active_loc if present
         if self.active_loc and self.active_loc in self.pixel_coords_map:
             x0, y0, x1, y1 = self.pixel_coords_map[self.active_loc]
-            cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-            # Scroll canvas to center (cx, cy)
-            cw = self.canvas.winfo_width() or 600
-            ch = self.canvas.winfo_height() or 400
-            fx = max(0.0, min(1.0, (cx - cw / 2) / img.width)) if img.width else 0.0
-            fy = max(0.0, min(1.0, (cy - ch / 2) / img.height)) if img.height else 0.0
+            cx = (x0 + x1) / 2 + self.draw_offset_x
+            cy = (y0 + y1) / 2 + self.draw_offset_y
+            fx = max(0.0, min(1.0, (cx - cw / 2) / max_w))
+            fy = max(0.0, min(1.0, (cy - ch / 2) / max_h))
             self.canvas.xview_moveto(fx)
             self.canvas.yview_moveto(fy)
 
             self.lbl_spotlight_badge.configure(
                 text=f"📍 Tiêu điểm: {self.active_loc}", text_color="#00F0FF"
             )
+
+        # Update fullscreen modal canvas if currently open
+        if getattr(self, "_active_fullscreen_canvas", None) is not None:
+            try:
+                f_can = self._active_fullscreen_canvas
+                f_modal = self._active_fullscreen_modal
+                tk_f_img = ImageTk.PhotoImage(img)
+                f_can.delete("all")
+                f_can.create_image(0, 0, anchor="nw", image=tk_f_img)
+                f_can.configure(scrollregion=(0, 0, img.width, img.height))
+                f_modal._tk_img_ref = tk_f_img
+            except Exception:
+                pass
 
     # ── DISPLAY MODE SWITCHING ───────────────────────────────────────────────
     def _on_display_mode_change(self, mode_str):
@@ -4860,24 +4974,33 @@ class SeriesBOMCompareView(ctk.CTkFrame):
         self._render_drawing()
 
     def _on_canvas_press(self, event):
-        self.pan_start_x = event.x
-        self.pan_start_y = event.y
+        self._pan_start_x = event.x
+        self._pan_start_y = event.y
+        self._pan_has_dragged = False
+        self.canvas.config(cursor="fleur")
+        self.canvas.scan_mark(event.x, event.y)
 
     def _on_canvas_drag(self, event):
-        dx = event.x - self.pan_start_x
-        dy = event.y - self.pan_start_y
-        self.canvas.xview_scroll(-1 if dx > 0 else (1 if dx < 0 else 0), "units")
-        self.canvas.yview_scroll(-1 if dy > 0 else (1 if dy < 0 else 0), "units")
-        self.pan_start_x = event.x
-        self.pan_start_y = event.y
+        dx = abs(event.x - self._pan_start_x)
+        dy = abs(event.y - self._pan_start_y)
+        if dx > 4 or dy > 4:
+            self._pan_has_dragged = True
+            self.canvas.scan_dragto(event.x, event.y, gain=1)
 
     def _on_canvas_release(self, event):
-        # Check if clicked on a highlighted component box
-        canvas_x = self.canvas.canvasx(event.x)
-        canvas_y = self.canvas.canvasy(event.y)
+        self.canvas.config(cursor="")
+        if getattr(self, "_pan_has_dragged", False):
+            # User was panning the canvas, do not trigger component click
+            return
+
+        # Single click: check if clicked on a highlighted component box
+        draw_x0 = getattr(self, "draw_offset_x", 0)
+        draw_y0 = getattr(self, "draw_offset_y", 0)
+        canvas_x = self.canvas.canvasx(event.x) - draw_x0
+        canvas_y = self.canvas.canvasy(event.y) - draw_y0
 
         for loc, (bx0, by0, bx1, by1) in self.pixel_coords_map.items():
-            if bx0 - 5 <= canvas_x <= bx1 + 5 and by0 - 5 <= canvas_y <= by1 + 5:
+            if bx0 - 6 <= canvas_x <= bx1 + 6 and by0 - 6 <= canvas_y <= by1 + 6:
                 # Component clicked!
                 self.active_loc = loc
                 # Toggle QC status
@@ -4917,17 +5040,22 @@ class SeriesBOMCompareView(ctk.CTkFrame):
 
         # Zoom in fullscreen
         ctk.CTkButton(
-            f_tb, text="🔍 -", width=30, height=24, command=self._zoom_out
+            f_tb, text="🔍 -", width=36, height=24, command=self._zoom_out
         ).pack(side="left", padx=4)
         ctk.CTkButton(
-            f_tb, text="🔍 +", width=30, height=24, command=self._zoom_in
+            f_tb, text="🔍 +", width=36, height=24, command=self._zoom_in
         ).pack(side="left", padx=4)
         ctk.CTkButton(
-            f_tb, text="🔄 Xoay", width=60, height=24, command=self._rotate_drawing
+            f_tb, text="🔄 Xoay", width=70, height=24, command=self._rotate_drawing
         ).pack(side="left", padx=4)
 
+        def _close_fullscreen():
+            self._active_fullscreen_canvas = None
+            self._active_fullscreen_modal = None
+            modal.destroy()
+
         ctk.CTkButton(
-            f_tb, text="✕ Đóng", width=70, height=24, fg_color="#E74C3C", command=modal.destroy
+            f_tb, text="✕ Đóng", width=70, height=24, fg_color="#E74C3C", command=_close_fullscreen
         ).pack(side="right", padx=10)
 
         # Fullscreen Canvas
@@ -4943,11 +5071,36 @@ class SeriesBOMCompareView(ctk.CTkFrame):
         f_vsb.pack(side="right", fill="y")
         f_hsb.pack(side="bottom", fill="x")
 
+        # Bind smooth pan & mousewheel in fullscreen
+        modal._f_pan_dragged = False
+        def _f_press(e):
+            modal._f_start_x = e.x
+            modal._f_start_y = e.y
+            modal._f_pan_dragged = False
+            f_canvas.config(cursor="fleur")
+            f_canvas.scan_mark(e.x, e.y)
+
+        def _f_drag(e):
+            if abs(e.x - getattr(modal, "_f_start_x", e.x)) > 4 or abs(e.y - getattr(modal, "_f_start_y", e.y)) > 4:
+                modal._f_pan_dragged = True
+                f_canvas.scan_dragto(e.x, e.y, gain=1)
+
+        def _f_release(e):
+            f_canvas.config(cursor="")
+
+        f_canvas.bind("<ButtonPress-1>", _f_press)
+        f_canvas.bind("<B1-Motion>", _f_drag)
+        f_canvas.bind("<ButtonRelease-1>", _f_release)
+        f_canvas.bind("<MouseWheel>", lambda e: self._zoom_in() if e.delta > 0 else self._zoom_out())
+
+        self._active_fullscreen_canvas = f_canvas
+        self._active_fullscreen_modal = modal
+        modal.protocol("WM_DELETE_WINDOW", _close_fullscreen)
+
         if self.current_annotated_img:
             tk_img = ImageTk.PhotoImage(self.current_annotated_img)
             f_canvas.create_image(0, 0, anchor="nw", image=tk_img)
             f_canvas.configure(scrollregion=(0, 0, self.current_annotated_img.width, self.current_annotated_img.height))
-            # Keep reference to prevent GC
             modal._tk_img_ref = tk_img
 
     # ── TABLE POPULATION & INTERACTIVE ACTIONS ───────────────────────────────
