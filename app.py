@@ -43,7 +43,8 @@ from model_comparator import (
     render_full_drawing_view, render_curtain_drawing_pair,
     get_drawing_pages_catalog, normalize_process_stage,
     export_model_comparison_excel, clear_curtain_cache,
-    get_annotated_base_images
+    get_annotated_base_images, extract_model_info,
+    validate_model_pair
 )
 
 def resource_path(relative_path: str) -> str:
@@ -750,6 +751,8 @@ class BOMCompareView(ctk.CTkFrame):
         self.comparison_result = None
         self.filter_mode = "all"
         self.search_query = ""
+        self._is_comparing: bool = False
+        self._comp_hud = None
 
         self.col_specs = [
             ("stt", 45, "center"),
@@ -1305,6 +1308,9 @@ class BOMCompareView(ctk.CTkFrame):
 
     # ── Comparison Execution ──────────────────────────────────────────────────
     def _run_comparison(self):
+        if getattr(self, "_is_comparing", False):
+            return
+
         if not self.excel_data:
             messagebox.showwarning("Thiếu dữ liệu", "Vui lòng chọn file Excel đối chiếu trước!")
             return
@@ -1312,75 +1318,249 @@ class BOMCompareView(ctk.CTkFrame):
             messagebox.showwarning("Thiếu dữ liệu", "Vui lòng chọn file Working Manual (PDF) trước!")
             return
 
-        try:
-            # 1. Extract items for selected WM page
-            target_proc = self.excel_data.get("process_code", "") if self.excel_data else ""
-            wm_page_data = extract_wm_page_items(self.pdf_path, self.selected_page_idx, variant_name=target_proc)
+        self._is_comparing = True
+        self.btn_run_comp.configure(
+            state="disabled", fg_color=("#94A3B8", "#1A3A35"),
+            text="⚡ Đang đối chiếu AI... (0%)"
+        )
 
-            # 2. Run diff engine
-            self.comparison_result = compare_boms(self.excel_data, wm_page_data)
-
-            # 3. Update Verdict Banner
-            res = self.comparison_result
-            if res["is_all_matched"]:
-                self.verdict_banner.configure(
-                    fg_color=("#DCFCE7", "#064E3B"),
-                    border_color=("#16A34A", "#059669")
-                )
-                self.lbl_verdict_title.configure(
-                    text=self.t("verdict_match_title"),
-                    text_color=("#15803D", "#34D399")
-                )
-                self.lbl_verdict_sub.configure(
-                    text=self.t("verdict_match_sub", total=res["total_excel"], proc=res["wm_process"]),
-                    text_color=("#166534", "#A7F3D0")
-                )
-            else:
-                self.verdict_banner.configure(
-                    fg_color=("#FEE2E2", "#3D1414"),
-                    border_color=("#DC2626", "#EF4444")
-                )
-                if res["count_missing_excel"] > 0 and res["count_mismatched"] == 0 and res["count_missing_wm"] == 0:
-                    self.lbl_verdict_title.configure(
-                        text=self.t("verdict_missing_excel_title", extra=res["count_missing_excel"]),
-                        text_color=("#B91C1C", "#F87171")
-                    )
-                    self.lbl_verdict_sub.configure(
-                        text=self.t("verdict_missing_excel_sub", extra=res["count_missing_excel"], proc=res["wm_process"]),
-                        text_color=("#991B1B", "#FECACA")
-                    )
-                else:
-                    self.lbl_verdict_title.configure(
-                        text=self.t("verdict_mismatch_title", total=res["total_discrepancies"]),
-                        text_color=("#B91C1C", "#F87171")
-                    )
-                    self.lbl_verdict_sub.configure(
-                        text=self.t("verdict_mismatch_sub",
-                                    mismatch=res["count_mismatched"],
-                                    missing=res["count_missing_wm"],
-                                    extra=res["count_missing_excel"]),
-                        text_color=("#991B1B", "#FECACA")
-                    )
-
-            # 4. Update Filter Tab counts
-            self.filter_tabs.configure(values=[
-                self.t("filter_comp_all", n=res["total_rows"]),
-                self.t("filter_comp_mismatch", n=res["total_discrepancies"]),
-                self.t("filter_comp_match", n=res["count_matched"])
-            ])
-
-            # 5. Populate Table
-            self._populate_table()
-
-            # 6. Enable Export
-            self.btn_export_comp.configure(state="normal")
+        # Clear tree & hide empty overlay
+        self.tree.delete(*self.tree.get_children())
+        if hasattr(self, "empty_overlay"):
             self.empty_overlay.place_forget()
 
-            # 7. Update top badges
-            self.app._update_badges_for_compare()
-            self.app.set_status(f"Đã đối chiếu xong: {res['count_matched']} khớp, {res['total_discrepancies']} sai lệch.")
-        except Exception as e:
-            messagebox.showerror("Lỗi đối chiếu", f"Đã xảy ra lỗi khi so sánh:\n{e}")
+        # Update Verdict Banner to analyzing state
+        self.verdict_banner.configure(fg_color=BG_CARD, border_color="#00F0FF")
+        self.lbl_verdict_title.configure(
+            text="⚡ VIPQC AI BOM AUDIT ENGINE ĐANG ĐỐI CHIẾU...",
+            text_color="#00F0FF"
+        )
+        self.lbl_verdict_sub.configure(
+            text="Đang phân tích cấu trúc Working Manual & đối chiếu ma trận linh kiện với Excel...",
+            text_color=TEXT_MUTED
+        )
+
+        # Remove previous HUD if any
+        if getattr(self, "_comp_hud", None) is not None:
+            try:
+                self._comp_hud.destroy()
+            except Exception:
+                pass
+            self._comp_hud = None
+
+        # Holographic HUD Card over self.table_card
+        is_dark = (self.app.current_theme == "dark")
+        self._comp_hud = ctk.CTkFrame(
+            self.table_card, fg_color="#0B132B" if is_dark else "#0F172A",
+            corner_radius=12, border_width=1.5, border_color="#00F0FF"
+        )
+        self._comp_hud.place(relx=0.5, rely=0.45, anchor="center")
+
+        hud_inner = ctk.CTkFrame(self._comp_hud, fg_color="transparent")
+        hud_inner.pack(padx=24, pady=16)
+
+        # Row 1: Header + Telemetry
+        h_row1 = ctk.CTkFrame(hud_inner, fg_color="transparent")
+        h_row1.pack(fill="x", pady=(0, 8))
+
+        ctk.CTkLabel(h_row1, text="🔍", font=("Segoe UI", 16)).pack(side="left", padx=(0, 6))
+        ctk.CTkLabel(
+            h_row1, text="VIPQC AI BOM AUDIT & COMPARISON ENGINE",
+            font=("Segoe UI", 11, "bold"), text_color="#00F0FF"
+        ).pack(side="left", padx=(0, 16))
+
+        ctk.CTkLabel(
+            h_row1, text="60 FPS • SMART MATRIX DIFF",
+            font=("Consolas", 9, "bold"), text_color="#38BDF8"
+        ).pack(side="right")
+
+        # Row 2: Progress bar + Percentage
+        h_row2 = ctk.CTkFrame(hud_inner, fg_color="transparent")
+        h_row2.pack(fill="x", pady=(0, 8))
+
+        comp_prog = ctk.CTkProgressBar(
+            h_row2, width=380, height=10, corner_radius=5,
+            fg_color="#1E293B", progress_color="#00F0FF"
+        )
+        comp_prog.set(0.0)
+        comp_prog.pack(side="left", padx=(0, 10))
+
+        lbl_comp_pct = ctk.CTkLabel(
+            h_row2, text="0%", font=("Consolas", 11, "bold"), text_color="#00F0FF", width=44
+        )
+        lbl_comp_pct.pack(side="left")
+
+        # Row 3: Live Terminal Log Phase
+        lbl_comp_log = ctk.CTkLabel(
+            hud_inner, text="[01/05] 📡 Khởi động VIPQC AI Audit Engine & nạp dữ liệu...",
+            font=("Consolas", 10), text_color="#E2E8F0", anchor="w"
+        )
+        lbl_comp_log.pack(fill="x")
+
+        # Background calculation worker
+        # Snapshot input data before launching background worker
+        excel_data_snap = self.excel_data
+        pdf_path_snap = self.pdf_path
+        page_idx_snap = self.selected_page_idx
+
+        comp_data = {"res": None, "err": None, "done": False}
+        def _bg_worker():
+            try:
+                target_proc = excel_data_snap.get("process_code", "") if excel_data_snap else ""
+                wm_page_data = extract_wm_page_items(pdf_path_snap, page_idx_snap, variant_name=target_proc)
+                comp_data["res"] = compare_boms(excel_data_snap, wm_page_data)
+            except Exception as ex:
+                comp_data["err"] = ex
+            finally:
+                comp_data["done"] = True
+
+        threading.Thread(target=_bg_worker, daemon=True).start()
+
+        # Animation parameters (3.5 seconds)
+        start_time = time.time()
+        anim_duration = 3.5
+
+        def _update_comp_anim():
+            if not getattr(self, "_is_comparing", False):
+                return
+
+            now = time.time()
+            elapsed = now - start_time
+            t = min(1.0, elapsed / anim_duration)
+
+            comp_prog.set(t)
+            pct = int(t * 100)
+            lbl_comp_pct.configure(text=f"{pct}%")
+            self.btn_run_comp.configure(text=f"⚡ Đang đối chiếu AI... ({pct}%)")
+
+            lang = getattr(self.app, "current_lang", "vi")
+            if lang == "zh":
+                if t < 0.20:
+                    lbl_comp_log.configure(text="[01/05] 📡 启动 VIPQC AI 智能核验引擎并载入数据...")
+                elif t < 0.40:
+                    lbl_comp_log.configure(text="[02/05] 📑 分析 Working Manual 结构与工序代码坐标...")
+                elif t < 0.65:
+                    lbl_comp_log.configure(text="[03/05] 🔬 交叉比对物料编码与安装位置 (Excel vs WM)...")
+                elif t < 0.85:
+                    lbl_comp_log.configure(text="[04/05] ⚡ 核查数量、规格差异及缺失/多余元件...")
+                else:
+                    lbl_comp_log.configure(text="[05/05] 🎯 汇总智能比对结果并完成最终判定！")
+            elif lang == "en":
+                if t < 0.20:
+                    lbl_comp_log.configure(text="[01/05] 📡 Starting VIPQC AI Audit Engine & ingesting data...")
+                elif t < 0.40:
+                    lbl_comp_log.configure(text="[02/05] 📑 Analyzing Working Manual structure & Process Code...")
+                elif t < 0.65:
+                    lbl_comp_log.configure(text="[03/05] 🔬 Cross-referencing Part No & Locations (Excel vs WM)...")
+                elif t < 0.85:
+                    lbl_comp_log.configure(text="[04/05] ⚡ Auditing Qty, Rating specs & missing/extra items...")
+                else:
+                    lbl_comp_log.configure(text="[05/05] 🎯 Aggregating comparison verdict & finalizing audit!")
+            else:
+                if t < 0.20:
+                    lbl_comp_log.configure(text="[01/05] 📡 Khởi động VIPQC AI Audit Engine & nạp dữ liệu...")
+                elif t < 0.40:
+                    lbl_comp_log.configure(text="[02/05] 📑 Phân tích cấu trúc Working Manual & toạ độ Process Code...")
+                elif t < 0.65:
+                    lbl_comp_log.configure(text="[03/05] 🔬 Đối chiếu ma trận Part No & Vị trí (Excel vs WM)...")
+                elif t < 0.85:
+                    lbl_comp_log.configure(text="[04/05] ⚡ Rà soát sai lệch Qty, Rating và linh kiện thừa/thiếu...")
+                else:
+                    lbl_comp_log.configure(text="[05/05] 🎯 Tổng hợp kết quả đối chiếu & hoàn tất đánh giá!")
+
+            if t < 1.0 or not comp_data["done"]:
+                self.after(16, _update_comp_anim)
+            else:
+                self._finish_comparison(comp_data)
+
+        self.after(20, _update_comp_anim)
+
+    def _finish_comparison(self, comp_data: dict):
+        self._is_comparing = False
+
+        # Pulse border on table_card
+        self.table_card.configure(border_color="#00F0FF", border_width=2)
+        self.after(180, lambda: self.table_card.configure(border_color=BORDER_CLR, border_width=1))
+
+        # Cleanup HUD
+        if getattr(self, "_comp_hud", None) is not None:
+            try:
+                self._comp_hud.destroy()
+            except Exception:
+                pass
+            self._comp_hud = None
+
+        self.btn_run_comp.configure(state="normal", fg_color=ACCENT_TEAL, text=self.t("btn_compare_now"))
+
+        if comp_data.get("err"):
+            messagebox.showerror("Lỗi đối chiếu", f"Đã xảy ra lỗi khi so sánh:\n{comp_data['err']}")
+            return
+
+        res = comp_data.get("res")
+        if not res:
+            return
+        self.comparison_result = res
+
+        # Update Verdict Banner
+        if res["is_all_matched"]:
+            self.verdict_banner.configure(
+                fg_color=("#DCFCE7", "#064E3B"),
+                border_color=("#16A34A", "#059669")
+            )
+            self.lbl_verdict_title.configure(
+                text=self.t("verdict_match_title"),
+                text_color=("#15803D", "#34D399")
+            )
+            self.lbl_verdict_sub.configure(
+                text=self.t("verdict_match_sub", total=res["total_excel"], proc=res["wm_process"]),
+                text_color=("#166534", "#A7F3D0")
+            )
+        else:
+            self.verdict_banner.configure(
+                fg_color=("#FEE2E2", "#3D1414"),
+                border_color=("#DC2626", "#EF4444")
+            )
+            if res["count_missing_excel"] > 0 and res["count_mismatched"] == 0 and res["count_missing_wm"] == 0:
+                self.lbl_verdict_title.configure(
+                    text=self.t("verdict_missing_excel_title", extra=res["count_missing_excel"]),
+                    text_color=("#B91C1C", "#F87171")
+                )
+                self.lbl_verdict_sub.configure(
+                    text=self.t("verdict_missing_excel_sub", extra=res["count_missing_excel"], proc=res["wm_process"]),
+                    text_color=("#991B1B", "#FECACA")
+                )
+            else:
+                self.lbl_verdict_title.configure(
+                    text=self.t("verdict_mismatch_title", total=res["total_discrepancies"]),
+                    text_color=("#B91C1C", "#F87171")
+                )
+                self.lbl_verdict_sub.configure(
+                    text=self.t("verdict_mismatch_sub",
+                                mismatch=res["count_mismatched"],
+                                missing=res["count_missing_wm"],
+                                extra=res["count_missing_excel"]),
+                    text_color=("#991B1B", "#FECACA")
+                )
+
+        # Update Filter Tab counts
+        self.filter_tabs.configure(values=[
+            self.t("filter_comp_all", n=res["total_rows"]),
+            self.t("filter_comp_mismatch", n=res["total_discrepancies"]),
+            self.t("filter_comp_match", n=res["count_matched"])
+        ])
+
+        # Populate Table
+        self._populate_table()
+
+        # Enable Export
+        self.btn_export_comp.configure(state="normal")
+        if hasattr(self, "empty_overlay"):
+            self.empty_overlay.place_forget()
+
+        # Update top badges
+        self.app._update_badges_for_compare()
+        self.app.set_status(f"Đã đối chiếu xong: {res['count_matched']} khớp, {res['total_discrepancies']} sai lệch.")
+        self.app.show_toast(f"✅ Đối chiếu hoàn tất: {res['count_matched']} khớp, {res['total_discrepancies']} sai lệch")
 
     def _populate_table(self):
         self.tree.delete(*self.tree.get_children())
@@ -1464,6 +1644,16 @@ class BOMCompareView(ctk.CTkFrame):
                 messagebox.showerror("Lỗi xuất file", f"Không thể lưu file báo cáo:\n{e}")
 
     def _reset(self):
+        if getattr(self, "_is_comparing", False):
+            self._is_comparing = False
+        if getattr(self, "_comp_hud", None) is not None:
+            try:
+                self._comp_hud.destroy()
+            except Exception:
+                pass
+            self._comp_hud = None
+        self.btn_run_comp.configure(state="normal", fg_color=ACCENT_TEAL, text=self.t("btn_compare_now"))
+
         self.excel_data = None
         self.pdf_path = None
         self.wm_pages_info.clear()
@@ -1667,6 +1857,14 @@ class DrawingFullScreenWindow(ctk.CTkToplevel):
         self.canvas_img_id = None
         self._curtain_render_pending: bool = False
         self.dragging_curtain: bool = False
+        self.draw_offset_x: int = 0
+        self.draw_offset_y: int = 0
+        self.pan_offset_x: int = 0
+        self.pan_offset_y: int = 0
+        self._pan_start_x: int = 0
+        self._pan_start_y: int = 0
+        self._pan_init_offset_x: int = 0
+        self._pan_init_offset_y: int = 0
 
         self.title("📐 Soi Chi Tiết Bản Vẽ PCB Toàn Màn Hình - VIPQC AI")
         self.geometry("1440x900")
@@ -2008,18 +2206,24 @@ class DrawingFullScreenWindow(ctk.CTkToplevel):
 
     def _zoom_100(self):
         self.canvas_img_id = None
+        self.pan_offset_x = 0
+        self.pan_offset_y = 0
         self.zoom_level = 1.0
         self.lbl_zoom.configure(text="100%")
         self._render_drawing(center_ref=False)
 
     def _rotate_drawing(self):
         self.canvas_img_id = None
+        self.pan_offset_x = 0
+        self.pan_offset_y = 0
         self.rotation_angle = (self.rotation_angle + 90) % 360
         self.btn_rotate.configure(text=f"🔄 {self.rotation_angle}°" if self.rotation_angle > 0 else "🔄 Xoay")
         self._zoom_fit()
 
     def _zoom_fit(self):
         self.canvas_img_id = None
+        self.pan_offset_x = 0
+        self.pan_offset_y = 0
         self.update_idletasks()
         cw = max(200, self.canvas.winfo_width())
         ch = max(200, self.canvas.winfo_height())
@@ -2043,37 +2247,63 @@ class DrawingFullScreenWindow(ctk.CTkToplevel):
         self.lbl_curtain_val.configure(text=f"Màn: {int(self.split_ratio * 100)}%")
         self._request_fast_curtain_render()
 
+    def _update_scrollbars(self):
+        cw = max(200, self.canvas.winfo_width())
+        ch = max(200, self.canvas.winfo_height())
+        draw_x0 = getattr(self, "draw_offset_x", 0)
+        draw_y0 = getattr(self, "draw_offset_y", 0)
+        mw = self.current_meta.get("width", cw)
+        mh = self.current_meta.get("height", ch)
+        min_x = min(0, draw_x0 + self.pan_offset_x)
+        min_y = min(0, draw_y0 + self.pan_offset_y)
+        max_x = max(cw, draw_x0 + self.pan_offset_x + mw)
+        max_y = max(ch, draw_y0 + self.pan_offset_y + mh)
+        self.canvas.config(scrollregion=(min_x, min_y, max_x, max_y))
+
     # ── Canvas Interactive Handlers ──────────────────────────────────────────
     def _on_canvas_mouse_motion(self, event):
-        canvas_x = self.canvas.canvasx(event.x)
         split_x = self.current_meta.get("split_x")
-        if self.view_mode == "curtain" and split_x is not None and abs(canvas_x - split_x) < 25:
+        draw_x0 = getattr(self, "draw_offset_x", 0)
+        curtain_x = draw_x0 + self.pan_offset_x + (split_x if split_x is not None else -9999)
+        if self.view_mode == "curtain" and split_x is not None and abs(event.x - curtain_x) < 30:
             self.canvas.config(cursor="sb_h_double_arrow")
         else:
             self.canvas.config(cursor="")
 
     def _on_canvas_b1_press(self, event):
-        canvas_x = self.canvas.canvasx(event.x)
         split_x = self.current_meta.get("split_x")
-        if self.view_mode == "curtain" and split_x is not None and abs(canvas_x - split_x) < 30:
+        draw_x0 = getattr(self, "draw_offset_x", 0)
+        curtain_x = draw_x0 + self.pan_offset_x + (split_x if split_x is not None else -9999)
+        if self.view_mode == "curtain" and split_x is not None and abs(event.x - curtain_x) < 30:
             self.dragging_curtain = True
             self.canvas.config(cursor="sb_h_double_arrow")
         else:
             self.dragging_curtain = False
             self.canvas.config(cursor="fleur")
-            self.canvas.scan_mark(event.x, event.y)
+            self._pan_start_x = event.x
+            self._pan_start_y = event.y
+            self._pan_init_offset_x = self.pan_offset_x
+            self._pan_init_offset_y = self.pan_offset_y
 
     def _on_canvas_b1_motion(self, event):
         if self.dragging_curtain:
-            canvas_x = self.canvas.canvasx(event.x)
+            draw_x0 = getattr(self, "draw_offset_x", 0)
             w = max(1, self.current_meta.get("width", 1))
-            ratio = max(0.0, min(1.0, canvas_x / float(w)))
+            ratio = max(0.0, min(1.0, (event.x - (draw_x0 + self.pan_offset_x)) / float(w)))
             self.split_ratio = ratio
             self.slider_curtain.set(ratio)
             self.lbl_curtain_val.configure(text=f"Màn: {int(ratio * 100)}%")
             self._request_fast_curtain_render()
         else:
-            self.canvas.scan_dragto(event.x, event.y, gain=1)
+            dx = event.x - self._pan_start_x
+            dy = event.y - self._pan_start_y
+            self.pan_offset_x = self._pan_init_offset_x + dx
+            self.pan_offset_y = self._pan_init_offset_y + dy
+            draw_x0 = getattr(self, "draw_offset_x", 0)
+            draw_y0 = getattr(self, "draw_offset_y", 0)
+            if getattr(self, "canvas_img_id", None) is not None:
+                self.canvas.coords(self.canvas_img_id, draw_x0 + self.pan_offset_x, draw_y0 + self.pan_offset_y)
+            self._update_scrollbars()
 
     def _on_canvas_b1_release(self, event):
         if self.dragging_curtain:
@@ -2083,10 +2313,21 @@ class DrawingFullScreenWindow(ctk.CTkToplevel):
 
     def _on_canvas_b2_press(self, event):
         self.canvas.config(cursor="fleur")
-        self.canvas.scan_mark(event.x, event.y)
+        self._pan_start_x = event.x
+        self._pan_start_y = event.y
+        self._pan_init_offset_x = self.pan_offset_x
+        self._pan_init_offset_y = self.pan_offset_y
 
     def _on_canvas_b2_motion(self, event):
-        self.canvas.scan_dragto(event.x, event.y, gain=1)
+        dx = event.x - self._pan_start_x
+        dy = event.y - self._pan_start_y
+        self.pan_offset_x = self._pan_init_offset_x + dx
+        self.pan_offset_y = self._pan_init_offset_y + dy
+        draw_x0 = getattr(self, "draw_offset_x", 0)
+        draw_y0 = getattr(self, "draw_offset_y", 0)
+        if getattr(self, "canvas_img_id", None) is not None:
+            self.canvas.coords(self.canvas_img_id, draw_x0 + self.pan_offset_x, draw_y0 + self.pan_offset_y)
+        self._update_scrollbars()
 
     def _on_canvas_mousewheel(self, event):
         if event.delta > 0:
@@ -2116,25 +2357,29 @@ class DrawingFullScreenWindow(ctk.CTkToplevel):
             )
             self.current_meta = meta
 
-            self.tk_canvas_img = ImageTk.PhotoImage(res_img)
-            if getattr(self, "canvas_img_id", None) is not None:
-                self.canvas.itemconfig(self.canvas_img_id, image=self.tk_canvas_img)
-            else:
-                self.canvas.delete("all")
-                self.canvas_img_id = self.canvas.create_image(0, 0, image=self.tk_canvas_img, anchor="nw", tags="drawing")
-            self.canvas.config(scrollregion=(0, 0, meta["width"], meta["height"]))
+            cw = max(200, self.canvas.winfo_width())
+            ch = max(200, self.canvas.winfo_height())
+            draw_x0 = max(0, (cw - meta["width"]) // 2)
+            draw_y0 = max(0, (ch - meta["height"]) // 2)
+            self.draw_offset_x = draw_x0
+            self.draw_offset_y = draw_y0
 
             if center_ref and meta.get("active_center"):
                 cx, cy = meta["active_center"]
-                self.update_idletasks()
-                cw = self.canvas.winfo_width()
-                ch = self.canvas.winfo_height()
-                if meta["width"] > cw and cw > 10:
-                    fx = max(0.0, min(1.0, (cx - cw / 2.0) / float(meta["width"])))
-                    self.canvas.xview_moveto(fx)
-                if meta["height"] > ch and ch > 10:
-                    fy = max(0.0, min(1.0, (cy - ch / 2.0) / float(meta["height"])))
-                    self.canvas.yview_moveto(fy)
+                self.pan_offset_x = (cw // 2) - (draw_x0 + cx)
+                self.pan_offset_y = (ch // 2) - (draw_y0 + cy)
+
+            img_x = draw_x0 + self.pan_offset_x
+            img_y = draw_y0 + self.pan_offset_y
+
+            self.tk_canvas_img = ImageTk.PhotoImage(res_img)
+            if getattr(self, "canvas_img_id", None) is not None:
+                self.canvas.coords(self.canvas_img_id, img_x, img_y)
+                self.canvas.itemconfig(self.canvas_img_id, image=self.tk_canvas_img)
+            else:
+                self.canvas.delete("all")
+                self.canvas_img_id = self.canvas.create_image(img_x, img_y, image=self.tk_canvas_img, anchor="nw", tags="drawing")
+            self._update_scrollbars()
         except Exception as e:
             print(f"Error in fullscreen rendering: {e}")
 
@@ -2178,6 +2423,14 @@ class ModelCompareView(ctk.CTkFrame):
         self.canvas_img_id = None
         self._curtain_render_pending: bool = False
         self.dragging_curtain: bool = False
+        self.draw_offset_x: int = 0
+        self.draw_offset_y: int = 0
+        self.pan_offset_x: int = 0
+        self.pan_offset_y: int = 0
+        self._pan_start_x: int = 0
+        self._pan_start_y: int = 0
+        self._pan_init_offset_x: int = 0
+        self._pan_init_offset_y: int = 0
         self.current_filter: str = "diff_all"
         self.search_query: str = ""
         self.active_ctk_image: ctk.CTkImage | None = None
@@ -2668,38 +2921,45 @@ class ModelCompareView(ctk.CTkFrame):
         )
         self.lbl_det_note.pack(side="left", fill="x", expand=True)
 
-        # Default packing: Split View (Side-by-side)
-        self.table_card.pack(side="left", fill="both", expand=True, padx=(0, 6))
-        self.inspector_card.pack(side="right", fill="both", expand=True)
+        # Default layout: Split View (Side-by-side) with equal 50:50 distribution
+        self.content_frame.columnconfigure(0, weight=1, uniform="split_col")
+        self.content_frame.columnconfigure(1, weight=1, uniform="split_col")
+        self.content_frame.rowconfigure(0, weight=1)
+
+        self.table_card.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+        self.inspector_card.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
 
     # ── Display Mode Switcher & Fullscreen ────────────────────────────────────
     def _on_display_mode_change(self, choice: str):
         c_low = choice.lower()
+        self.table_card.grid_forget()
+        self.inspector_card.grid_forget()
+
         if "bảng" in c_low or "table" in c_low or "表格" in c_low:
             self.display_mode = "table"
             if not self.row_models.winfo_ismapped():
                 self.row_models.pack(fill="x", pady=(0, 6), before=self.card_compare_box)
-            self.inspector_card.pack_forget()
-            self.table_card.pack_forget()
-            self.table_card.pack(fill="both", expand=True)
+            self.content_frame.columnconfigure(0, weight=1, uniform="")
+            self.content_frame.columnconfigure(1, weight=0, uniform="")
+            self.table_card.grid(row=0, column=0, columnspan=2, sticky="nsew")
         elif "bản vẽ" in c_low or "drawing" in c_low or "图纸" in c_low:
             self.display_mode = "drawing"
             # Hide model selection cards row to give maximum height to PCB drawing inspector!
             if self.row_models.winfo_ismapped():
                 self.row_models.pack_forget()
-            self.table_card.pack_forget()
-            self.inspector_card.pack_forget()
-            self.inspector_card.pack(fill="both", expand=True)
+            self.content_frame.columnconfigure(0, weight=0, uniform="")
+            self.content_frame.columnconfigure(1, weight=1, uniform="")
+            self.inspector_card.grid(row=0, column=0, columnspan=2, sticky="nsew")
             self.canvas_img_id = None
             self.after(60, self._zoom_fit)
         else: # split
             self.display_mode = "split"
             if not self.row_models.winfo_ismapped():
                 self.row_models.pack(fill="x", pady=(0, 6), before=self.card_compare_box)
-            self.table_card.pack_forget()
-            self.inspector_card.pack_forget()
-            self.table_card.pack(side="left", fill="both", expand=True, padx=(0, 6))
-            self.inspector_card.pack(side="right", fill="both", expand=True)
+            self.content_frame.columnconfigure(0, weight=1, uniform="split_col")
+            self.content_frame.columnconfigure(1, weight=1, uniform="split_col")
+            self.table_card.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+            self.inspector_card.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
             self.canvas_img_id = None
             self._render_drawing(center_ref=False)
 
@@ -2769,9 +3029,25 @@ class ModelCompareView(ctk.CTkFrame):
                 )
                 self.app.show_toast(f"⚠️ File vượt quá {MAX_FILE_SIZE_MB}MB!")
                 return
-            self.pdf_a_path = os.path.normpath(fn)
-            self.lbl_model_a_name.configure(text=f"📄 {os.path.basename(fn)} ({format_file_size(sz)})")
-            self.lbl_model_a_sub.configure(text="Đã nạp file Model A.")
+
+            candidate_a = os.path.normpath(fn)
+            if self.pdf_b_path:
+                is_valid, err_msg, info_a, info_b = validate_model_pair(candidate_a, self.pdf_b_path)
+                if not is_valid:
+                    messagebox.showerror("Bản Vẽ Không Thỏa Mãn", err_msg)
+                    self.app.show_toast("⚠️ Bản vẽ không cùng Model hoặc trùng Series!")
+                    return
+                self.pdf_a_path = candidate_a
+                self.lbl_model_a_name.configure(text=f"📄 {os.path.basename(candidate_a)} ({format_file_size(sz)})")
+                self.lbl_model_a_sub.configure(text=f"Model: {info_a['display_model']}  |  Series: {info_a['display_series'] or 'Gốc'}")
+                self.lbl_model_b_sub.configure(text=f"Model: {info_b['display_model']}  |  Series: {info_b['display_series'] or 'Mới'}")
+                self.app.show_toast(f"✅ Hợp lệ: Model {info_a['display_model']} (Series {info_a['display_series'] or 'A'} vs {info_b['display_series'] or 'B'})")
+            else:
+                self.pdf_a_path = candidate_a
+                info_a = extract_model_info(candidate_a)
+                self.lbl_model_a_name.configure(text=f"📄 {os.path.basename(candidate_a)} ({format_file_size(sz)})")
+                self.lbl_model_a_sub.configure(text=f"Model: {info_a['display_model']}  |  Series: {info_a['display_series'] or '---'}")
+                self.app.show_toast(f"Đã nạp Model A ({info_a['display_model']}). Vui lòng chọn Model B cùng Model nhưng khác Series.")
 
     def _select_pdf_b(self):
         fn = filedialog.askopenfilename(
@@ -2788,9 +3064,25 @@ class ModelCompareView(ctk.CTkFrame):
                 )
                 self.app.show_toast(f"⚠️ File vượt quá {MAX_FILE_SIZE_MB}MB!")
                 return
-            self.pdf_b_path = os.path.normpath(fn)
-            self.lbl_model_b_name.configure(text=f"📄 {os.path.basename(fn)} ({format_file_size(sz)})")
-            self.lbl_model_b_sub.configure(text="Đã nạp file Model B.")
+
+            candidate_b = os.path.normpath(fn)
+            if self.pdf_a_path:
+                is_valid, err_msg, info_a, info_b = validate_model_pair(self.pdf_a_path, candidate_b)
+                if not is_valid:
+                    messagebox.showerror("Bản Vẽ Không Thỏa Mãn", err_msg)
+                    self.app.show_toast("⚠️ Bản vẽ không cùng Model hoặc trùng Series!")
+                    return
+                self.pdf_b_path = candidate_b
+                self.lbl_model_b_name.configure(text=f"📄 {os.path.basename(candidate_b)} ({format_file_size(sz)})")
+                self.lbl_model_a_sub.configure(text=f"Model: {info_a['display_model']}  |  Series: {info_a['display_series'] or 'Gốc'}")
+                self.lbl_model_b_sub.configure(text=f"Model: {info_b['display_model']}  |  Series: {info_b['display_series'] or 'Mới'}")
+                self.app.show_toast(f"✅ Hợp lệ: Model {info_b['display_model']} (Series {info_a['display_series'] or 'A'} vs {info_b['display_series'] or 'B'})")
+            else:
+                self.pdf_b_path = candidate_b
+                info_b = extract_model_info(candidate_b)
+                self.lbl_model_b_name.configure(text=f"📄 {os.path.basename(candidate_b)} ({format_file_size(sz)})")
+                self.lbl_model_b_sub.configure(text=f"Model: {info_b['display_model']}  |  Series: {info_b['display_series'] or '---'}")
+                self.app.show_toast(f"Đã nạp Model B ({info_b['display_model']}). Vui lòng chọn Model A cùng Model nhưng khác Series.")
 
     def handle_drop_files(self, files):
         pdf_files = []
@@ -2810,29 +3102,64 @@ class ModelCompareView(ctk.CTkFrame):
                 pdf_files.append(item)
 
         if len(pdf_files) >= 2:
-            self.pdf_a_path = pdf_files[0]
-            self.pdf_b_path = pdf_files[1]
+            cand_a = pdf_files[0]
+            cand_b = pdf_files[1]
+            is_valid, err_msg, info_a, info_b = validate_model_pair(cand_a, cand_b)
+            if not is_valid:
+                messagebox.showerror("Bản Vẽ Không Thỏa Mãn", err_msg)
+                self.app.show_toast("⚠️ 2 file kéo thả không cùng Model hoặc trùng Series!")
+                return
+            self.pdf_a_path = cand_a
+            self.pdf_b_path = cand_b
             sz_a = os.path.getsize(self.pdf_a_path)
             sz_b = os.path.getsize(self.pdf_b_path)
             self.lbl_model_a_name.configure(text=f"📄 {os.path.basename(self.pdf_a_path)} ({format_file_size(sz_a)})")
+            self.lbl_model_a_sub.configure(text=f"Model: {info_a['display_model']}  |  Series: {info_a['display_series'] or 'Gốc'}")
             self.lbl_model_b_name.configure(text=f"📄 {os.path.basename(self.pdf_b_path)} ({format_file_size(sz_b)})")
-            self.app.show_toast("Đã nạp 2 file Model A & Model B!")
+            self.lbl_model_b_sub.configure(text=f"Model: {info_b['display_model']}  |  Series: {info_b['display_series'] or 'Mới'}")
+            self.app.show_toast(f"✅ Đã nạp cặp bản vẽ: Model {info_a['display_model']} (Series {info_a['display_series'] or 'A'} vs {info_b['display_series'] or 'B'})")
         elif len(pdf_files) == 1:
+            cand = pdf_files[0]
+            sz = os.path.getsize(cand)
             if not self.pdf_a_path:
-                self.pdf_a_path = pdf_files[0]
-                sz_a = os.path.getsize(self.pdf_a_path)
-                self.lbl_model_a_name.configure(text=f"📄 {os.path.basename(self.pdf_a_path)} ({format_file_size(sz_a)})")
-                self.app.show_toast("Đã nạp Model A! Kéo thả thêm file cho Model B.")
+                if self.pdf_b_path:
+                    is_valid, err_msg, info_a, info_b = validate_model_pair(cand, self.pdf_b_path)
+                    if not is_valid:
+                        messagebox.showerror("Bản Vẽ Không Thỏa Mãn", err_msg)
+                        self.app.show_toast("⚠️ File kéo thả không khớp Model với Model B!")
+                        return
+                    self.pdf_a_path = cand
+                    self.lbl_model_a_name.configure(text=f"📄 {os.path.basename(cand)} ({format_file_size(sz)})")
+                    self.lbl_model_a_sub.configure(text=f"Model: {info_a['display_model']}  |  Series: {info_a['display_series'] or 'Gốc'}")
+                    self.lbl_model_b_sub.configure(text=f"Model: {info_b['display_model']}  |  Series: {info_b['display_series'] or 'Mới'}")
+                    self.app.show_toast("✅ Đã nạp đủ 2 file Model A & Model B!")
+                else:
+                    self.pdf_a_path = cand
+                    info_a = extract_model_info(cand)
+                    self.lbl_model_a_name.configure(text=f"📄 {os.path.basename(cand)} ({format_file_size(sz)})")
+                    self.lbl_model_a_sub.configure(text=f"Model: {info_a['display_model']}  |  Series: {info_a['display_series'] or '---'}")
+                    self.app.show_toast("Đã nạp Model A! Kéo thả thêm file cho Model B.")
             else:
-                self.pdf_b_path = pdf_files[0]
-                sz_b = os.path.getsize(self.pdf_b_path)
-                self.lbl_model_b_name.configure(text=f"📄 {os.path.basename(self.pdf_b_path)} ({format_file_size(sz_b)})")
-                self.app.show_toast("Đã nạp Model B!")
+                is_valid, err_msg, info_a, info_b = validate_model_pair(self.pdf_a_path, cand)
+                if not is_valid:
+                    messagebox.showerror("Bản Vẽ Không Thỏa Mãn", err_msg)
+                    self.app.show_toast("⚠️ File kéo thả không khớp Model với Model A!")
+                    return
+                self.pdf_b_path = cand
+                self.lbl_model_b_name.configure(text=f"📄 {os.path.basename(cand)} ({format_file_size(sz)})")
+                self.lbl_model_a_sub.configure(text=f"Model: {info_a['display_model']}  |  Series: {info_a['display_series'] or 'Gốc'}")
+                self.lbl_model_b_sub.configure(text=f"Model: {info_b['display_model']}  |  Series: {info_b['display_series'] or 'Mới'}")
+                self.app.show_toast("✅ Đã nạp đủ 2 file Model A & Model B!")
 
     # ── Comparison Execution with AI Laser Scan Animation ─────────────────────
     def _run_comparison(self):
         if not self.pdf_a_path or not self.pdf_b_path:
             messagebox.showwarning("Thiếu File", "Vui lòng chọn cả 2 file PDF của Model A và Model B!")
+            return
+
+        is_valid, err_msg, info_a, info_b = validate_model_pair(self.pdf_a_path, self.pdf_b_path)
+        if not is_valid:
+            messagebox.showerror("Không Thể So Sánh", err_msg)
             return
 
         if getattr(self, "_is_scanning", False):
@@ -2860,15 +3187,16 @@ class ModelCompareView(ctk.CTkFrame):
             )
             cw = max(200, self.canvas.winfo_width())
             ch = max(200, self.canvas.winfo_height())
-            draw_x0 = max(0, (cw - bw) // 2)
-            draw_y0 = max(0, (ch - bh) // 2)
+            self.pan_offset_x = 0
+            self.pan_offset_y = 0
             self.draw_offset_x = draw_x0
             self.draw_offset_y = draw_y0
+            self.current_meta = {"width": bw, "height": bh}
 
             self.tk_canvas_img = ImageTk.PhotoImage(base_b)
             self.canvas.delete("all")
             self.canvas_img_id = self.canvas.create_image(draw_x0, draw_y0, image=self.tk_canvas_img, anchor="nw", tags="drawing")
-            self.canvas.config(scrollregion=(0, 0, draw_x0 + bw, draw_y0 + bh))
+            self._update_scrollbars()
         except Exception:
             cw = max(200, self.canvas.winfo_width())
             ch = max(200, self.canvas.winfo_height())
@@ -3195,18 +3523,24 @@ class ModelCompareView(ctk.CTkFrame):
 
     def _zoom_100(self):
         self.canvas_img_id = None
+        self.pan_offset_x = 0
+        self.pan_offset_y = 0
         self.zoom_level = 1.0
         self.lbl_zoom.configure(text="100%")
         self._render_drawing(center_ref=False)
 
     def _rotate_drawing(self):
         self.canvas_img_id = None
+        self.pan_offset_x = 0
+        self.pan_offset_y = 0
         self.rotation_angle = (self.rotation_angle + 90) % 360
         self.btn_rotate.configure(text=f"🔄 {self.rotation_angle}°" if self.rotation_angle > 0 else "🔄 Xoay")
         self._zoom_fit()
 
     def _zoom_fit(self):
         self.canvas_img_id = None
+        self.pan_offset_x = 0
+        self.pan_offset_y = 0
         self.update_idletasks()
         cw = max(200, self.canvas.winfo_width())
         ch = max(200, self.canvas.winfo_height())
@@ -3230,40 +3564,63 @@ class ModelCompareView(ctk.CTkFrame):
         self.lbl_curtain_val.configure(text=f"Màn: {int(self.split_ratio * 100)}%")
         self._request_fast_curtain_render()
 
+    def _update_scrollbars(self):
+        cw = max(200, self.canvas.winfo_width())
+        ch = max(200, self.canvas.winfo_height())
+        draw_x0 = getattr(self, "draw_offset_x", 0)
+        draw_y0 = getattr(self, "draw_offset_y", 0)
+        mw = self.current_meta.get("width", cw)
+        mh = self.current_meta.get("height", ch)
+        min_x = min(0, draw_x0 + self.pan_offset_x)
+        min_y = min(0, draw_y0 + self.pan_offset_y)
+        max_x = max(cw, draw_x0 + self.pan_offset_x + mw)
+        max_y = max(ch, draw_y0 + self.pan_offset_y + mh)
+        self.canvas.config(scrollregion=(min_x, min_y, max_x, max_y))
+
     # ── Interactive Canvas Handlers ──────────────────────────────────────────
     def _on_canvas_mouse_motion(self, event):
-        canvas_x = self.canvas.canvasx(event.x)
-        draw_x0 = getattr(self, "draw_offset_x", 0)
         split_x = self.current_meta.get("split_x")
-        if self.view_mode == "curtain" and split_x is not None and abs(canvas_x - (draw_x0 + split_x)) < 25:
+        draw_x0 = getattr(self, "draw_offset_x", 0)
+        curtain_x = draw_x0 + self.pan_offset_x + (split_x if split_x is not None else -9999)
+        if self.view_mode == "curtain" and split_x is not None and abs(event.x - curtain_x) < 30:
             self.canvas.config(cursor="sb_h_double_arrow")
         else:
             self.canvas.config(cursor="")
 
     def _on_canvas_b1_press(self, event):
-        canvas_x = self.canvas.canvasx(event.x)
-        draw_x0 = getattr(self, "draw_offset_x", 0)
         split_x = self.current_meta.get("split_x")
-        if self.view_mode == "curtain" and split_x is not None and abs(canvas_x - (draw_x0 + split_x)) < 30:
+        draw_x0 = getattr(self, "draw_offset_x", 0)
+        curtain_x = draw_x0 + self.pan_offset_x + (split_x if split_x is not None else -9999)
+        if self.view_mode == "curtain" and split_x is not None and abs(event.x - curtain_x) < 30:
             self.dragging_curtain = True
             self.canvas.config(cursor="sb_h_double_arrow")
         else:
             self.dragging_curtain = False
             self.canvas.config(cursor="fleur")
-            self.canvas.scan_mark(event.x, event.y)
+            self._pan_start_x = event.x
+            self._pan_start_y = event.y
+            self._pan_init_offset_x = self.pan_offset_x
+            self._pan_init_offset_y = self.pan_offset_y
 
     def _on_canvas_b1_motion(self, event):
         if self.dragging_curtain:
-            canvas_x = self.canvas.canvasx(event.x)
             draw_x0 = getattr(self, "draw_offset_x", 0)
             w = max(1, self.current_meta.get("width", 1))
-            ratio = max(0.0, min(1.0, (canvas_x - draw_x0) / float(w)))
+            ratio = max(0.0, min(1.0, (event.x - (draw_x0 + self.pan_offset_x)) / float(w)))
             self.split_ratio = ratio
             self.slider_curtain.set(ratio)
             self.lbl_curtain_val.configure(text=f"Màn: {int(ratio * 100)}%")
             self._request_fast_curtain_render()
         else:
-            self.canvas.scan_dragto(event.x, event.y, gain=1)
+            dx = event.x - self._pan_start_x
+            dy = event.y - self._pan_start_y
+            self.pan_offset_x = self._pan_init_offset_x + dx
+            self.pan_offset_y = self._pan_init_offset_y + dy
+            draw_x0 = getattr(self, "draw_offset_x", 0)
+            draw_y0 = getattr(self, "draw_offset_y", 0)
+            if getattr(self, "canvas_img_id", None) is not None:
+                self.canvas.coords(self.canvas_img_id, draw_x0 + self.pan_offset_x, draw_y0 + self.pan_offset_y)
+            self._update_scrollbars()
 
     def _on_canvas_b1_release(self, event):
         if self.dragging_curtain:
@@ -3273,10 +3630,21 @@ class ModelCompareView(ctk.CTkFrame):
 
     def _on_canvas_b2_press(self, event):
         self.canvas.config(cursor="fleur")
-        self.canvas.scan_mark(event.x, event.y)
+        self._pan_start_x = event.x
+        self._pan_start_y = event.y
+        self._pan_init_offset_x = self.pan_offset_x
+        self._pan_init_offset_y = self.pan_offset_y
 
     def _on_canvas_b2_motion(self, event):
-        self.canvas.scan_dragto(event.x, event.y, gain=1)
+        dx = event.x - self._pan_start_x
+        dy = event.y - self._pan_start_y
+        self.pan_offset_x = self._pan_init_offset_x + dx
+        self.pan_offset_y = self._pan_init_offset_y + dy
+        draw_x0 = getattr(self, "draw_offset_x", 0)
+        draw_y0 = getattr(self, "draw_offset_y", 0)
+        if getattr(self, "canvas_img_id", None) is not None:
+            self.canvas.coords(self.canvas_img_id, draw_x0 + self.pan_offset_x, draw_y0 + self.pan_offset_y)
+        self._update_scrollbars()
 
     def _on_canvas_mousewheel(self, event):
         if event.delta > 0:
@@ -3313,28 +3681,22 @@ class ModelCompareView(ctk.CTkFrame):
             self.draw_offset_x = draw_x0
             self.draw_offset_y = draw_y0
 
+            if center_ref and meta.get("active_center"):
+                cx, cy = meta["active_center"]
+                self.pan_offset_x = (cw // 2) - (draw_x0 + cx)
+                self.pan_offset_y = (ch // 2) - (draw_y0 + cy)
+
+            img_x = draw_x0 + self.pan_offset_x
+            img_y = draw_y0 + self.pan_offset_y
+
             self.tk_canvas_img = ImageTk.PhotoImage(res_img)
             if getattr(self, "canvas_img_id", None) is not None:
-                self.canvas.coords(self.canvas_img_id, draw_x0, draw_y0)
+                self.canvas.coords(self.canvas_img_id, img_x, img_y)
                 self.canvas.itemconfig(self.canvas_img_id, image=self.tk_canvas_img)
             else:
                 self.canvas.delete("all")
-                self.canvas_img_id = self.canvas.create_image(draw_x0, draw_y0, image=self.tk_canvas_img, anchor="nw", tags="drawing")
-            self.canvas.config(scrollregion=(0, 0, draw_x0 + meta["width"], draw_y0 + meta["height"]))
-
-            if center_ref and meta.get("active_center"):
-                cx, cy = meta["active_center"]
-                self.update_idletasks()
-                cw = self.canvas.winfo_width()
-                ch = self.canvas.winfo_height()
-                tot_w = draw_x0 + meta["width"]
-                tot_h = draw_y0 + meta["height"]
-                if tot_w > cw and cw > 10:
-                    fx = max(0.0, min(1.0, ((draw_x0 + cx) - cw / 2.0) / float(tot_w)))
-                    self.canvas.xview_moveto(fx)
-                if tot_h > ch and ch > 10:
-                    fy = max(0.0, min(1.0, ((draw_y0 + cy) - ch / 2.0) / float(tot_h)))
-                    self.canvas.yview_moveto(fy)
+                self.canvas_img_id = self.canvas.create_image(img_x, img_y, image=self.tk_canvas_img, anchor="nw", tags="drawing")
+            self._update_scrollbars()
         except Exception as e:
             print(f"Error rendering drawing: {e}")
 
@@ -3502,6 +3864,8 @@ class ModelCompareView(ctk.CTkFrame):
                 pass
             self.fullscreen_window = None
 
+        self.pan_offset_x = 0
+        self.pan_offset_y = 0
         self.pdf_a_path = None
         self.pdf_b_path = None
         self.comp_result = None
@@ -3638,6 +4002,8 @@ class BOMExtractorApp(ctk.CTk):
         self.all_records: list[dict] = []
         self.last_exports: list[str] = []
         self.is_running = False
+        self._extract_hud = None
+        self.preview_card = None
 
         self.LANG_MAP = {
             "Tiếng Việt": "vi",
@@ -4081,9 +4447,10 @@ class BOMExtractorApp(ctk.CTk):
         self._active_filter = None
 
         # ── Treeview table ───────────────────────────────────────────────────
-        preview_card = ctk.CTkFrame(parent, fg_color=BG_CARD, corner_radius=10,
-                                    border_width=1, border_color=BORDER_CLR)
-        preview_card.pack(fill="both", expand=True)
+        self.preview_card = ctk.CTkFrame(parent, fg_color=BG_CARD, corner_radius=10,
+                                         border_width=1, border_color=BORDER_CLR)
+        self.preview_card.pack(fill="both", expand=True)
+        preview_card = self.preview_card
 
         self.tree_frame = tk.Frame(preview_card, bg="#131929")
         self.tree_frame.pack(fill="both", expand=True, padx=2, pady=2)
@@ -4572,6 +4939,16 @@ class BOMExtractorApp(ctk.CTk):
             self.lbl_empty_list.pack(pady=30)
 
     def _clear_files(self):
+        if getattr(self, "is_running", False):
+            self.is_running = False
+        if getattr(self, "_extract_hud", None) is not None:
+            try:
+                self._extract_hud.destroy()
+            except Exception:
+                pass
+            self._extract_hud = None
+        self.btn_run.configure(state="normal", fg_color=ACCENT_TEAL, text=self.t("btn_run"))
+
         self.selected_files.clear()
         for w in list(self.file_scroll.winfo_children()):
             if isinstance(w, FileRow):
@@ -4680,6 +5057,9 @@ class BOMExtractorApp(ctk.CTk):
         if self._toast_timer:
             self.after_cancel(self._toast_timer)
         self._toast_timer = self.after(2200, lambda: self.toast_frame.place_forget())
+
+    def show_toast(self, message: str):
+        self._show_toast(message)
 
     def _on_tree_double_click(self, event):
         """Double clicking a table row copies the Part No to clipboard."""
@@ -4844,92 +5224,261 @@ class BOMExtractorApp(ctk.CTk):
         self.log_box.insert("end", f"{msg}\n", tag)
         self.log_box.see("end")
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # EXTRACTION THREAD
-    # ──────────────────────────────────────────────────────────────────────────
+    # ── EXTRACTION THREAD & ANIMATION ─────────────────────────────────────────
     def _start_thread(self):
         if not self.selected_files:
             messagebox.showwarning(self.t("msg_no_files_title"), self.t("msg_no_files_body"))
             return
         if self.is_running:
             return
+
         self.is_running = True
-        self.btn_run.configure(state="disabled", fg_color=("#94A3B8", "#1A3A35"),
-                               text=self.t("btn_running"))
+        self.btn_run.configure(
+            state="disabled", fg_color=("#94A3B8", "#1A3A35"),
+            text="⚡ Đang trích xuất BOM AI... (0%)"
+        )
         self.all_records.clear()
         self.tree.delete(*self.tree.get_children())
+        if hasattr(self, "empty_preview"):
+            self.empty_preview.place_forget()
         self.progress.set(0)
-        threading.Thread(target=self._run, daemon=True).start()
 
-    def _run(self):
-        try:
-            files = list(self.selected_files)
-            n = len(files)
-            out_dir = self.output_dir.get().strip() or "excel_results"
-            os.makedirs(out_dir, exist_ok=True)
-            batch_data = []
-            self.last_exports = []
+        # Remove previous HUD if any
+        if getattr(self, "_extract_hud", None) is not None:
+            try:
+                self._extract_hud.destroy()
+            except Exception:
+                pass
+            self._extract_hud = None
 
-            self._log(self.t("log_start", n=n), "bold")
+        # Build Cyberpunk Hologram HUD Card over self.preview_card
+        is_dark = (self.current_theme == "dark")
+        target_parent = getattr(self, "preview_card", self.tree_frame)
+        self._extract_hud = ctk.CTkFrame(
+            target_parent, fg_color="#0B132B" if is_dark else "#0F172A",
+            corner_radius=12, border_width=1.5, border_color="#00F0FF"
+        )
+        self._extract_hud.place(relx=0.5, rely=0.42, anchor="center")
 
-            for i, fpath in enumerate(files, 1):
-                fname = os.path.basename(fpath)
-                self.lbl_status.configure(
-                    text=self.t("status_processing", i=i, n=n, fname=fname))
-                self._log(self.t("log_analyzing", i=i, n=n, fname=fname), "info")
+        hud_inner = ctk.CTkFrame(self._extract_hud, fg_color="transparent")
+        hud_inner.pack(padx=24, pady=16)
 
-                try:
-                    meta, flat, mat = extract_full_bom(fpath)
-                    batch_data.append((meta, flat, mat))
+        # Row 1: Header + Telemetry
+        h_row1 = ctk.CTkFrame(hud_inner, fg_color="transparent")
+        h_row1.pack(fill="x", pady=(0, 8))
 
-                    procs = ", ".join(meta.get("processes", [])) or "N/A"
-                    self._log(
-                        self.t("log_parsed",
-                               pwb=meta.get("pwb_code") or "N/A",
-                               procs=procs,
-                               items=meta.get("total_items", 0),
-                               qty=meta.get("total_parts_count", 0)),
-                        "success")
+        ctk.CTkLabel(h_row1, text="⚡", font=("Segoe UI", 16)).pack(side="left", padx=(0, 6))
+        ctk.CTkLabel(
+            h_row1, text="VIPQC AI BOM EXTRACTION ENGINE",
+            font=("Segoe UI", 11, "bold"), text_color="#00F0FF"
+        ).pack(side="left", padx=(0, 16))
 
-                    self.all_records.extend(flat)
-                    self._populate_tree(self.all_records)
-                    self._rebuild_filter_tabs()
-                    self._refresh_badges()
+        ctk.CTkLabel(
+            h_row1, text="60 FPS • NEURAL PDF PARSER",
+            font=("Consolas", 9, "bold"), text_color="#38BDF8"
+        ).pack(side="right")
 
-                    if self.export_individual.get():
-                        base = os.path.splitext(fname)[0]
-                        xl = os.path.join(out_dir, f"BOM_{base}.xlsx")
-                        export_bom_to_excel(meta, flat, mat, xl)
-                        self.last_exports.append(xl)
-                        self._log(self.t("log_exported", name=f"BOM_{base}.xlsx"), "success")
+        # Row 2: Progress bar + Percentage
+        h_row2 = ctk.CTkFrame(hud_inner, fg_color="transparent")
+        h_row2.pack(fill="x", pady=(0, 8))
 
-                except Exception as ex:
-                    self._log(self.t("log_error", fname=fname, err=ex), "error")
+        ext_prog = ctk.CTkProgressBar(
+            h_row2, width=380, height=10, corner_radius=5,
+            fg_color="#1E293B", progress_color="#00F0FF"
+        )
+        ext_prog.set(0.0)
+        ext_prog.pack(side="left", padx=(0, 10))
 
-                self.progress.set(i / n)
+        lbl_ext_pct = ctk.CTkLabel(
+            h_row2, text="0%", font=("Consolas", 11, "bold"), text_color="#00F0FF", width=44
+        )
+        lbl_ext_pct.pack(side="left")
 
-            if self.export_batch.get() and batch_data:
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                master_xl = os.path.join(out_dir, f"Master_BOM_{ts}.xlsx")
-                export_batch_bom_to_excel(batch_data, master_xl)
-                self.last_exports.insert(0, master_xl)
-                self._log(self.t("log_master", name=f"Master_BOM_{ts}.xlsx"), "success")
+        # Row 3: Live Terminal Phase
+        lbl_ext_log = ctk.CTkLabel(
+            hud_inner, text="[01/05] 📡 Khởi tạo VIPQC Neural Vision & PDF Engine...",
+            font=("Consolas", 10), text_color="#E2E8F0", anchor="w"
+        )
+        lbl_ext_log.pack(fill="x")
 
-            total_qty = sum(r.get("Qty", 0) for r in self.all_records)
-            self._log(self.t("log_finish", rows=len(self.all_records), qty=total_qty), "bold")
-            self.lbl_status.configure(
-                text=self.t("status_done", count=len(self.all_records), n=n))
-            self._refresh_badges()
+        # Snapshot configuration on main thread before launching worker
+        files_to_process = list(self.selected_files)
+        out_dir_path = self.output_dir.get().strip() or "excel_results"
+        opt_export_ind = bool(self.export_individual.get())
+        opt_export_batch = bool(self.export_batch.get())
 
-            if self.last_exports:
-                self.btn_open_xl.configure(state="normal")
+        ext_data = {
+            "done": False,
+            "err": None,
+            "records": [],
+            "batch_data": [],
+            "last_exports": [],
+            "files_count": len(files_to_process)
+        }
 
-        except Exception as e:
-            self._log(f"Error: {e}", "error")
-        finally:
-            self.is_running = False
-            self.btn_run.configure(state="normal", fg_color=ACCENT_TEAL,
-                                   text=self.t("btn_run"))
+        def safe_log(msg, tag="info"):
+            try:
+                self.after(0, lambda m=msg, t=tag: self._log(m, t))
+            except Exception:
+                pass
+
+        def _bg_extract():
+            try:
+                files = files_to_process
+                n = len(files)
+                os.makedirs(out_dir_path, exist_ok=True)
+                batch_data = []
+                last_exports = []
+                all_recs = []
+
+                safe_log(self.t("log_start", n=n), "bold")
+
+                for i, fpath in enumerate(files, 1):
+                    fname = os.path.basename(fpath)
+                    safe_log(self.t("log_analyzing", i=i, n=n, fname=fname), "info")
+
+                    try:
+                        meta, flat, mat = extract_full_bom(fpath)
+                        batch_data.append((meta, flat, mat))
+
+                        procs = ", ".join(meta.get("processes", [])) or "N/A"
+                        safe_log(
+                            self.t("log_parsed",
+                                   pwb=meta.get("pwb_code") or "N/A",
+                                   procs=procs,
+                                   items=meta.get("total_items", 0),
+                                   qty=meta.get("total_parts_count", 0)),
+                            "success")
+
+                        all_recs.extend(flat)
+
+                        if opt_export_ind:
+                            base = os.path.splitext(fname)[0]
+                            xl = os.path.join(out_dir_path, f"BOM_{base}.xlsx")
+                            export_bom_to_excel(meta, flat, mat, xl)
+                            last_exports.append(xl)
+                            safe_log(self.t("log_exported", name=f"BOM_{base}.xlsx"), "success")
+
+                    except Exception as ex:
+                        safe_log(self.t("log_error", fname=fname, err=ex), "error")
+
+                if opt_export_batch and batch_data:
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    master_xl = os.path.join(out_dir_path, f"Master_BOM_{ts}.xlsx")
+                    export_batch_bom_to_excel(batch_data, master_xl)
+                    last_exports.insert(0, master_xl)
+                    safe_log(self.t("log_master", name=f"Master_BOM_{ts}.xlsx"), "success")
+
+                ext_data["records"] = all_recs
+                ext_data["batch_data"] = batch_data
+                ext_data["last_exports"] = last_exports
+            except Exception as e:
+                ext_data["err"] = e
+            finally:
+                ext_data["done"] = True
+
+        threading.Thread(target=_bg_extract, daemon=True).start()
+
+        # Animation parameters (3.5 seconds)
+        start_time = time.time()
+        anim_duration = 3.5
+
+        def _update_extract_anim():
+            if not getattr(self, "is_running", False):
+                return
+
+            now = time.time()
+            elapsed = now - start_time
+            t = min(1.0, elapsed / anim_duration)
+
+            ext_prog.set(t)
+            self.progress.set(t)
+            pct = int(t * 100)
+            lbl_ext_pct.configure(text=f"{pct}%")
+            self.btn_run.configure(text=f"⚡ Đang trích xuất BOM AI... ({pct}%)")
+
+            lang = getattr(self, "current_lang", "vi")
+            if lang == "zh":
+                if t < 0.20:
+                    lbl_ext_log.configure(text="[01/05] 📡 正在启动 VIPQC 视觉与文档解析引擎...")
+                elif t < 0.40:
+                    lbl_ext_log.configure(text="[02/05] 📑 解析 Working Manual 表格结构与列坐标...")
+                elif t < 0.65:
+                    lbl_ext_log.configure(text="[03/05] 🔬 提取 SMD 芯片、IC、电阻与插件元件...")
+                elif t < 0.85:
+                    lbl_ext_log.configure(text="[04/05] ⚡ 规范化工序代码、位置代码并统计数量...")
+                else:
+                    lbl_ext_log.configure(text="[05/05] 🎯 正在完成数据导出并生成 Excel 结果！")
+            elif lang == "en":
+                if t < 0.20:
+                    lbl_ext_log.configure(text="[01/05] 📡 Initializing VIPQC Neural Vision & PDF Engine...")
+                elif t < 0.40:
+                    lbl_ext_log.configure(text="[02/05] 📑 Parsing Working Manual tables & column layout...")
+                elif t < 0.65:
+                    lbl_ext_log.configure(text="[03/05] 🔬 Extracting SMD chips, ICs, resistors & components...")
+                elif t < 0.85:
+                    lbl_ext_log.configure(text="[04/05] ⚡ Normalizing Process Codes, Ref Des & aggregating Qty...")
+                else:
+                    lbl_ext_log.configure(text="[05/05] 🎯 Finalizing extraction & generating Excel report!")
+            else:
+                if t < 0.20:
+                    lbl_ext_log.configure(text="[01/05] 📡 Khởi tạo VIPQC Neural Vision & PDF Engine...")
+                elif t < 0.40:
+                    lbl_ext_log.configure(text="[02/05] 📑 Phân tích bảng biểu Working Manual & tọa độ cột...")
+                elif t < 0.65:
+                    lbl_ext_log.configure(text="[03/05] 🔬 Trích xuất linh kiện SMD, IC, Resistor & chân cắm...")
+                elif t < 0.85:
+                    lbl_ext_log.configure(text="[04/05] ⚡ Chuẩn hóa Process Code, Ref Des & tính tổng Qty...")
+                else:
+                    lbl_ext_log.configure(text="[05/05] 🎯 Hoàn tất trích xuất & ghi dữ liệu ra tệp Excel!")
+
+            if t < 1.0 or not ext_data["done"]:
+                self.after(16, _update_extract_anim)
+            else:
+                self._finish_extraction(ext_data)
+
+        self.after(20, _update_extract_anim)
+
+    def _finish_extraction(self, ext_data: dict):
+        self.is_running = False
+
+        # Pulse border on preview_card
+        if hasattr(self, "preview_card") and self.preview_card:
+            self.preview_card.configure(border_color="#00F0FF", border_width=2)
+            self.after(180, lambda: self.preview_card.configure(border_color=BORDER_CLR, border_width=1))
+
+        # Cleanup HUD
+        if getattr(self, "_extract_hud", None) is not None:
+            try:
+                self._extract_hud.destroy()
+            except Exception:
+                pass
+            self._extract_hud = None
+
+        self.btn_run.configure(state="normal", fg_color=ACCENT_TEAL, text=self.t("btn_run"))
+
+        if ext_data.get("err"):
+            self._log(f"Error: {ext_data['err']}", "error")
+            messagebox.showerror("Lỗi Trích Xuất", f"Đã xảy ra lỗi khi trích xuất BOM:\n{ext_data['err']}")
+            return
+
+        self.all_records = ext_data.get("records", [])
+        self.last_exports = ext_data.get("last_exports", [])
+
+        # Populate tree and update UI
+        self._populate_tree(self.all_records)
+        self._rebuild_filter_tabs()
+        self._refresh_badges()
+
+        n = ext_data.get("files_count", len(self.selected_files))
+        total_qty = sum(r.get("Qty", 0) for r in self.all_records)
+        self._log(self.t("log_finish", rows=len(self.all_records), qty=total_qty), "bold")
+        self.lbl_status.configure(text=self.t("status_done", count=len(self.all_records), n=n))
+
+        if self.last_exports:
+            self.btn_open_xl.configure(state="normal")
+
+        self.show_toast(f"✅ Đã trích xuất thành công {len(self.all_records)} linh kiện!")
 
     # ──────────────────────────────────────────────────────────────────────────
     # QUICK ACCESS

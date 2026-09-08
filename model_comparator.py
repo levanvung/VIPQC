@@ -24,11 +24,205 @@ import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
-from bom_extractor import extract_full_bom
+from bom_extractor import extract_full_bom, extract_metadata
 from bom_comparator import parse_locations_string, normalize_part_no, normalize_key
 
 MAX_FILE_SIZE_MB = 10
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
+
+
+def clean_filename(filename: str) -> str:
+    """
+    Strips noise prefix and suffix tags from a file name (e.g. MP, PP, (1), BOM, etc.)
+    to isolate the canonical PCB Model and Series.
+    Examples:
+      'CHP3178AF-1A MP.pdf' -> 'CHP3178AF-1A'
+      'CHP3178AF-1A MP (1).pdf' -> 'CHP3178AF-1A'
+      'RAD3125AF-2A MP.pdf' -> 'RAD3125AF-2A'
+      'BOM_CHP2902DPL-1A (1).xlsx' -> 'CHP2902DPL-1A'
+    """
+    name = os.path.splitext(os.path.basename(filename))[0]
+    # Remove prefix tags
+    name = re.sub(r'^(?:BOM|WM|Working[_\s\-]*Manual|Manual|Model[_\s\-]*[AB]?)[_\-\s]+', '', name, flags=re.IGNORECASE)
+    # Repeatedly strip trailing copy brackets, stage suffixes, and doc tags
+    for _ in range(5):
+        prev = name
+        # Strip trailing duplicate / copy brackets like (1), [2], Copy, Copy (1)
+        name = re.sub(r'[\s_\-]+(?:\(\d+\)|\[\d+\]|Copy(?:\s*\(\d+\))?)$', '', name, flags=re.IGNORECASE)
+        # Strip trailing manufacturing stage tags (MP, PP, EVT, DVT, PVT, ES, CS, MASS, PROD, SAMPLE, PILOT, TEST, TP, etc.)
+        name = re.sub(r'[\s_\-]+(?:MP|PP|EVT|DVT|PVT|ES|CS|MASS|PROD|SAMPLE|PILOT|TEST|TP|FINAL|NEW|OLD|DRAFT|RELEASED?)$', '', name, flags=re.IGNORECASE)
+        # Strip trailing doc type tags (BOM, WM, DRAWING, DRAW, MANUAL, PCB, SCH, LAYOUT, v\d+, rev\d+)
+        name = re.sub(r'[\s_\-]+(?:BOM|WM|DRAWING|DRAW|MANUAL|PCB|SCH|LAYOUT|v\d+|rev\d+)$', '', name, flags=re.IGNORECASE)
+        name = name.strip(' _-')
+        if name == prev:
+            break
+    return name
+
+
+def parse_filename_model_series(filename: str) -> tuple[str, str]:
+    """
+    Extracts (base_model, series) from a filename.
+    Examples:
+      'CHP3178AF-1A MP.pdf' -> ('CHP3178AF', '1A')
+      'CHP3178AF-1B MP.pdf' -> ('CHP3178AF', '1B')
+      '3275-2A.pdf' -> ('3275', '2A')
+      '3275-2B.pdf' -> ('3275', '2B')
+      'CAR3072_RevB.pdf' -> ('CAR3072', 'B')
+      'CHA3072AR-2A.pdf' -> ('CHA3072AR', '2A')
+    """
+    clean = clean_filename(filename)
+
+    # 1. Check for REV / SERIES / VER keyword e.g. CAR3072_RevB
+    m_rev = re.search(r'^(.*?)[-_]?(?:REV|SERIES|VER)[-_]?([0-9]*[A-Za-z])$', clean, re.IGNORECASE)
+    if m_rev and len(m_rev.group(1)) >= 2:
+        return m_rev.group(1).rstrip('-_').upper(), m_rev.group(2).upper()
+
+    # 2. Check for pattern <name>-[0-9]*[A-Za-z] e.g. CHP3178AF-1A, 3275-2A, CHA3072AR-2A, CAR3072-A
+    m_code = re.search(r'^(.*?)[-_]([0-9]+[A-Za-z]|[A-Za-z])$', clean)
+    if m_code and len(m_code.group(1)) >= 2:
+        return m_code.group(1).upper(), m_code.group(2).upper()
+
+    # 3. Pattern <digits><letter> e.g. 3275A, CAR3072A
+    m_end = re.search(r'^(.*?\d+)([A-Za-z])$', clean)
+    if m_end and len(m_end.group(1)) >= 2:
+        return m_end.group(1).upper(), m_end.group(2).upper()
+
+    return clean.upper(), ""
+
+
+def extract_model_info(pdf_path: str) -> dict:
+    """
+    Extracts Model identification and Series/Revision code from a Working Manual PDF.
+    Combines:
+      1. Filename conventions (e.g. CHP3178AF-1A MP.pdf -> Model: CHP3178AF, Series: 1A).
+      2. Embedded PDF metadata: PWB Part Code, Process Code, Model/Variant code.
+    """
+    fname = os.path.splitext(os.path.basename(pdf_path))[0]
+    fn_model, fn_series = parse_filename_model_series(fname)
+
+    pwb_code = ""
+    process_code = ""
+    model_text = ""
+    variant_code = ""
+
+    if os.path.exists(pdf_path):
+        try:
+            doc = fitz.open(pdf_path)
+            for pidx in range(min(3, len(doc))):
+                txt = doc[pidx].get_text("text")
+                meta = extract_metadata(txt)
+                if meta.get("pwb_code") and not pwb_code:
+                    pwb_code = meta["pwb_code"]
+                if meta.get("process_code") and not process_code and meta["process_code"] != "PROGRAM":
+                    process_code = meta["process_code"]
+                if meta.get("model") and not model_text:
+                    model_text = meta["model"].split('\n')[0].strip()
+                m_var = re.search(r'MODEL\s*CODE\s*["\']([A-Z0-9]+)["\']', txt, re.IGNORECASE)
+                if m_var and not variant_code:
+                    variant_code = m_var.group(1).strip()
+        except Exception as e:
+            print(f"Error extracting metadata from {pdf_path}: {e}")
+
+    # Determine base model and series
+    is_generic_fn = bool(re.match(r'^(?:media_\d+|\d{8,}|scan.*|doc.*)$', fname, re.IGNORECASE))
+
+    proc_series = ""
+    if process_code:
+        m_ps = re.search(r'[-_]([0-9]*[A-Z]+(?:-[A-Z0-9]+)?)$', process_code)
+        proc_series = m_ps.group(1) if m_ps else ""
+
+    # Priority for Series:
+    # 1. Filename series (if descriptive, e.g. '1A', '1B')
+    # 2. Process code series (e.g. '1A' from 'CHP3178AF-1A', '2A' from 'CHA3072AR-2A')
+    # 3. Variant code only if it contains letters (e.g. '2A', avoiding numeric chassis codes like '14')
+    # 4. Fallback
+    if not is_generic_fn and fn_series:
+        display_series = fn_series
+    elif proc_series:
+        display_series = proc_series
+    elif variant_code and any(c.isalpha() for c in variant_code):
+        display_series = variant_code
+    else:
+        display_series = proc_series or variant_code or fn_series or ""
+
+    # Priority for Model:
+    # Authoritative PWB code if available in PDF, otherwise filename model
+    display_model = pwb_code or fn_model
+
+    return {
+        "filepath": pdf_path,
+        "filename": os.path.basename(pdf_path),
+        "display_model": display_model,
+        "display_series": display_series,
+        "pwb_code": pwb_code,
+        "process_code": process_code,
+        "fn_model": fn_model,
+        "fn_series": fn_series,
+        "is_generic_fn": is_generic_fn
+    }
+
+
+def validate_model_pair(pdf_path_a: str, pdf_path_b: str) -> tuple[bool, str, dict, dict]:
+    """
+    Validates that:
+      1. Both files share the SAME base Model.
+      2. Both files have DIFFERENT Series / Revisions.
+    Returns (is_valid: bool, error_message: str, info_a: dict, info_b: dict).
+    """
+    if not pdf_path_a or not pdf_path_b:
+        return False, "Vui lòng chọn cả 2 file Model A và Model B.", {}, {}
+
+    info_a = extract_model_info(pdf_path_a)
+    info_b = extract_model_info(pdf_path_b)
+
+    # 1. Check duplicate identical file
+    if os.path.abspath(pdf_path_a) == os.path.abspath(pdf_path_b):
+        return False, (
+            "Bạn đang chọn 2 file HOÀN TOÀN GIỐNG NHAU!\n\n"
+            "Vui lòng chọn 2 bản vẽ có Series khác nhau để so sánh sự sai khác."
+        ), info_a, info_b
+
+    # 2. Check Same Model:
+    same_model = False
+    if info_a["pwb_code"] and info_b["pwb_code"]:
+        same_model = (info_a["pwb_code"].upper() == info_b["pwb_code"].upper())
+    elif info_a["fn_model"] and info_b["fn_model"] and not info_a["is_generic_fn"] and not info_b["is_generic_fn"]:
+        same_model = (info_a["fn_model"].upper() == info_b["fn_model"].upper())
+    else:
+        same_model = (info_a["display_model"].upper() == info_b["display_model"].upper())
+
+    # Fallback match by core numeric part (e.g. '3178' in QPWBCAF3178 and CHP3178AF)
+    if not same_model and info_a["display_model"] and info_b["display_model"]:
+        dm_a = info_a["display_model"].upper()
+        dm_b = info_b["display_model"].upper()
+        nums_a = re.findall(r'\d{3,}', dm_a)
+        nums_b = re.findall(r'\d{3,}', dm_b)
+        if nums_a and nums_b and set(nums_a) == set(nums_b):
+            same_model = True
+
+    if not same_model:
+        m_a = info_a["display_model"]
+        m_b = info_b["display_model"]
+        return False, (
+            f"Hai bản vẽ KHÔNG CÙNG MODEL!\n\n"
+            f"• File A: Model '{m_a}'\n"
+            f"• File B: Model '{m_b}'\n\n"
+            f"Yêu cầu: Hai bản vẽ phải CÙNG MODEL nhưng KHÁC SERIES (ví dụ: cùng model 3275 nhưng là series 1A và 1B)."
+        ), info_a, info_b
+
+    # 3. Check Different Series:
+    ser_a = info_a["display_series"].upper()
+    ser_b = info_b["display_series"].upper()
+
+    if ser_a and ser_b and ser_a == ser_b:
+        return False, (
+            f"Hai bản vẽ TRÙNG SERIES ('{ser_a}')!\n\n"
+            f"• File A: {info_a['filename']} (Series: {ser_a})\n"
+            f"• File B: {info_b['filename']} (Series: {ser_b})\n\n"
+            f"Yêu cầu: Hai bản vẽ phải KHÁC SERIES (ví dụ: Series 1A và Series 1B) để phát hiện sự sai khác."
+        ), info_a, info_b
+
+    return True, "", info_a, info_b
 
 
 def normalize_process_stage(proc_name: str) -> str:
@@ -213,6 +407,11 @@ def compare_model_manuals(pdf_path_a: str, pdf_path_b: str) -> dict:
         if os.path.getsize(p) > MAX_FILE_SIZE_BYTES:
             raise ValueError(f"File '{os.path.basename(p)}' vượt quá giới hạn {MAX_FILE_SIZE_MB}MB.")
 
+    # Validate that both files belong to the same model but have different series
+    is_valid, err_msg, info_a, info_b = validate_model_pair(pdf_path_a, pdf_path_b)
+    if not is_valid:
+        raise ValueError(err_msg)
+
     # Extract BOM items using core extractor
     meta_a, flat_a, _ = extract_full_bom(pdf_path_a)
     meta_b, flat_b, _ = extract_full_bom(pdf_path_b)
@@ -317,6 +516,8 @@ def compare_model_manuals(pdf_path_a: str, pdf_path_b: str) -> dict:
         "model_a": {
             "path": pdf_path_a,
             "filename": os.path.basename(pdf_path_a),
+            "display_model": info_a.get("display_model", ""),
+            "display_series": info_a.get("display_series", ""),
             "pwb_code": meta_a.get("pwb_code", ""),
             "models": meta_a.get("models", []),
             "processes": meta_a.get("processes", []),
@@ -326,6 +527,8 @@ def compare_model_manuals(pdf_path_a: str, pdf_path_b: str) -> dict:
         "model_b": {
             "path": pdf_path_b,
             "filename": os.path.basename(pdf_path_b),
+            "display_model": info_b.get("display_model", ""),
+            "display_series": info_b.get("display_series", ""),
             "pwb_code": meta_b.get("pwb_code", ""),
             "models": meta_b.get("models", []),
             "processes": meta_b.get("processes", []),
@@ -707,7 +910,7 @@ def render_curtain_drawing_pair(
         split_x = None
     else:  # "curtain"
         split_ratio = max(0.0, min(1.0, split_ratio))
-        split_x = int(w * split_ratio)
+        split_x = max(0, min(w, int(w * split_ratio)))
         res_img = img_b.copy()
         if split_x > 0:
             res_img.paste(img_a.crop((0, 0, split_x, h)), (0, 0))
@@ -716,20 +919,29 @@ def render_curtain_drawing_pair(
         # Clean thin cyan curtain divider line
         draw_c.line([(split_x, 0), (split_x, h)], fill="#22D3EE", width=2)
 
-        # Top Model Badges
+        # Top Model Badges (Safely bounded within canvas margins)
         b_y = 12
-        draw_c.rectangle([split_x - 116, b_y, split_x - 6, b_y + 24], fill="#0F172A")
-        draw_c.rectangle([split_x - 116, b_y, split_x - 6, b_y + 24], outline="#22D3EE", width=1)
-        draw_c.text((split_x - 106, b_y + 5), "📄 Model A (Gốc)", fill="#38BDF8")
+        if split_x > 30:
+            a_x2 = min(split_x - 6, w - 6)
+            a_x1 = max(4, a_x2 - 110)
+            if a_x2 > a_x1:
+                draw_c.rectangle([a_x1, b_y, a_x2, b_y + 24], fill="#0F172A")
+                draw_c.rectangle([a_x1, b_y, a_x2, b_y + 24], outline="#22D3EE", width=1)
+                draw_c.text((a_x1 + 6, b_y + 5), "📄 Model A (Gốc)", fill="#38BDF8")
 
-        draw_c.rectangle([split_x + 6, b_y, split_x + 116, b_y + 24], fill="#0F172A")
-        draw_c.rectangle([split_x + 6, b_y, split_x + 116, b_y + 24], outline="#10B981", width=1)
-        draw_c.text((split_x + 16, b_y + 5), "📄 Model B (Mới)", fill="#34D399")
+        if split_x < w - 30:
+            b_x1 = max(4, split_x + 6)
+            b_x2 = min(w - 4, b_x1 + 110)
+            if b_x2 > b_x1:
+                draw_c.rectangle([b_x1, b_y, b_x2, b_y + 24], fill="#0F172A")
+                draw_c.rectangle([b_x1, b_y, b_x2, b_y + 24], outline="#10B981", width=1)
+                draw_c.text((b_x1 + 6, b_y + 5), "📄 Model B (Mới)", fill="#34D399")
 
-        # Center draggable handle button
+        # Center draggable handle button (Safely clamped)
         my = h // 2
-        draw_c.ellipse([split_x - 14, my - 14, split_x + 14, my + 14], fill="#0891B2", outline="#FFFFFF", width=2)
-        draw_c.text((split_x - 9, my - 7), "◂||▸", fill="#FFFFFF")
+        hx = max(14, min(w - 14, split_x))
+        draw_c.ellipse([hx - 14, my - 14, hx + 14, my + 14], fill="#0891B2", outline="#FFFFFF", width=2)
+        draw_c.text((hx - 9, my - 7), "◂||▸", fill="#FFFFFF")
 
     meta = {
         "width": w,
