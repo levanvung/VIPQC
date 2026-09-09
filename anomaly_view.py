@@ -72,9 +72,15 @@ class PasswordDialog(ctk.CTkToplevel):
 
         self.update_idletasks()
         try:
-            x = parent.winfo_rootx() + (parent.winfo_width() // 2) - 200
-            y = parent.winfo_rooty() + (parent.winfo_height() // 2) - 125
-            self.geometry(f"+{x}+{y}")
+            sw = self.winfo_screenwidth()
+            sh = self.winfo_screenheight()
+            x = max(50, (sw - 400) // 2)
+            y = max(50, (sh - 250) // 2)
+            self.geometry(f"400x250+{x}+{y}")
+            self.lift()
+            self.attributes("-topmost", True)
+            self.after(150, lambda: self.attributes("-topmost", False))
+            self.focus_force()
         except Exception:
             pass
 
@@ -135,6 +141,20 @@ class ChangePasswordDialog(ctk.CTkToplevel):
         self.configure(fg_color=BG_CARD)
         self.transient(parent)
         self.grab_set()
+
+        self.update_idletasks()
+        try:
+            sw = self.winfo_screenwidth()
+            sh = self.winfo_screenheight()
+            x = max(50, (sw - 420) // 2)
+            y = max(50, (sh - 330) // 2)
+            self.geometry(f"420x330+{x}+{y}")
+            self.lift()
+            self.attributes("-topmost", True)
+            self.after(150, lambda: self.attributes("-topmost", False))
+            self.focus_force()
+        except Exception:
+            pass
 
         pad = {"padx": 24}
 
@@ -1186,7 +1206,7 @@ class AnomalyDrawerFrame(ctk.CTkFrame):
         self.ent_notes.delete(0, "end")
         self._clear_image()
 
-        self.pack(side="right", fill="y", padx=(10, 0))
+        self.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
         self.ent_product.focus()
 
     def open_for_edit(self, report_data: dict):
@@ -1238,11 +1258,11 @@ class AnomalyDrawerFrame(ctk.CTkFrame):
         else:
             self._clear_image()
 
-        self.pack(side="right", fill="y", padx=(10, 0))
+        self.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
         self.ent_product.focus()
 
     def close_drawer(self):
-        self.pack_forget()
+        self.grid_forget()
 
     def _save_report(self):
         prod = self.ent_product.get().strip()
@@ -1420,9 +1440,13 @@ class AnomalyReportView(ctk.CTkFrame):
         self.content_area = ctk.CTkFrame(self, fg_color="transparent")
         self.content_area.pack(fill="both", expand=True)
 
+        self.content_area.grid_rowconfigure(0, weight=1)
+        self.content_area.grid_columnconfigure(0, weight=1)
+        self.content_area.grid_columnconfigure(1, weight=0)
+
         self.tbl_card = ctk.CTkFrame(self.content_area, fg_color=BG_CARD, corner_radius=12,
                                      border_width=1, border_color=BORDER_CLR)
-        self.tbl_card.pack(side="left", fill="both", expand=True)
+        self.tbl_card.grid(row=0, column=0, sticky="nsew")
 
         # Drawer on right (docked, hidden until opened)
         self.drawer = AnomalyDrawerFrame(self.content_area, self, on_saved=self._on_drawer_saved)
@@ -1696,13 +1720,13 @@ class AnomalyReportView(ctk.CTkFrame):
 
     # ── CRUD ACTIONS ─────────────────────────────────────────────────────────
     def _on_add_report(self):
-        self._require_admin(lambda: self.drawer.open_for_create())
+        self.drawer.open_for_create()
 
     def _on_edit_report(self):
         if not self.selected_report:
             messagebox.showwarning("Chưa chọn", "Vui lòng click chọn một báo cáo trên bảng để chỉnh sửa!")
             return
-        self._require_admin(lambda: self.drawer.open_for_edit(self.selected_report))
+        self.drawer.open_for_edit(self.selected_report)
 
     def _on_drawer_saved(self, saved_rep):
         self.refresh_data()
@@ -1723,7 +1747,7 @@ class AnomalyReportView(ctk.CTkFrame):
             if confirm:
                 ok = svc.delete_report(rep["id"], rep.get("image_url"))
                 if ok:
-                    if hasattr(self, "drawer") and self.drawer.winfo_manager() == "pack":
+                    if hasattr(self, "drawer") and self.drawer.winfo_manager() == "grid":
                         if str(self.drawer.report_data.get("id")) == str(rep.get("id")):
                             self.drawer.close_drawer()
                     self.selected_report = None
