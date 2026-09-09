@@ -77,12 +77,12 @@ TEXT_PRIMARY= ("#0F172A", "#E8EDF5")   # Primary text
 TEXT_MUTED  = ("#64748B", "#7A8BA6")   # Muted / secondary text
 BORDER_CLR  = ("#CBD5E1", "#2A3650")   # Border outline
 
-FONT_HERO   = ("Segoe UI", 22, "bold")
-FONT_H1     = ("Segoe UI", 14, "bold")
-FONT_H2     = ("Segoe UI", 12, "bold")
-FONT_BODY   = ("Segoe UI", 11)
-FONT_MONO   = ("Consolas", 10)
-FONT_BADGE  = ("Segoe UI", 9, "bold")
+FONT_HERO   = ("Segoe UI", 24, "bold")
+FONT_H1     = ("Segoe UI", 15, "bold")
+FONT_H2     = ("Segoe UI", 13, "bold")
+FONT_BODY   = ("Segoe UI", 12)
+FONT_MONO   = ("Consolas", 11)
+FONT_BADGE  = ("Segoe UI", 10, "bold")
 
 # Process-code type → colour chip
 PROC_COLORS = {
@@ -5499,16 +5499,16 @@ class BOMExtractorApp(ctk.CTk):
                         background=tree_bg,
                         fieldbackground=tree_bg,
                         foreground=tree_fg,
-                        rowheight=28,
-                        font=("Segoe UI", 10),
+                        rowheight=32,
+                        font=("Segoe UI", 11),
                         borderwidth=0,
                         relief="flat")
         style.configure("BOM.Treeview.Heading",
                         background=hdr_bg,
                         foreground=hdr_fg,
-                        font=("Segoe UI", 10, "bold"),
+                        font=("Segoe UI", 11, "bold"),
                         relief="flat",
-                        padding=5)
+                        padding=6)
         style.map("BOM.Treeview",
                   background=[("selected", sel_bg)],
                   foreground=[("selected", sel_fg)])

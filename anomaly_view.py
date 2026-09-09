@@ -41,11 +41,11 @@ TEXT_PRIMARY= ("#0F172A", "#E8EDF5")
 TEXT_MUTED  = ("#64748B", "#7A8BA6")
 BORDER_CLR  = ("#CBD5E1", "#2A3650")
 
-FONT_H1     = ("Segoe UI", 13, "bold")
-FONT_H2     = ("Segoe UI", 11, "bold")
-FONT_BODY   = ("Segoe UI", 10)
-FONT_BOLD   = ("Segoe UI", 10, "bold")
-FONT_SMALL  = ("Segoe UI", 9)
+FONT_H1     = ("Segoe UI", 15, "bold")
+FONT_H2     = ("Segoe UI", 13, "bold")
+FONT_BODY   = ("Segoe UI", 12)
+FONT_BOLD   = ("Segoe UI", 12, "bold")
+FONT_SMALL  = ("Segoe UI", 11)
 
 
 def safe_after(widget, ms: int, callback):
@@ -1646,6 +1646,10 @@ class AnomalyReportView(ctk.CTkFrame):
         tree_container.grid_rowconfigure(0, weight=1)
         tree_container.grid_columnconfigure(0, weight=1)
 
+        style = ttk.Style()
+        style.configure("Anomaly.Treeview", rowheight=60, font=("Segoe UI", 12))
+        style.configure("Anomaly.Treeview.Heading", font=("Segoe UI", 12, "bold"), padding=6)
+
         cols = (
             "stt", "date", "process", "product", "machine", "tot", "def", "rate",
             "resp", "pic", "desc", "cause", "counter", "sop", "prog", "notes"
@@ -1654,30 +1658,30 @@ class AnomalyReportView(ctk.CTkFrame):
                                  style="Anomaly.Treeview", selectmode="browse")
 
         self.tree.heading("#0", text="Ảnh Lỗi", anchor="center")
-        self.tree.column("#0", width=75, minwidth=65, anchor="center", stretch=False)
+        self.tree.column("#0", width=80, minwidth=70, anchor="center", stretch=False)
 
         headers_meta = [
-            ("stt", "STT", 50, "center"),
-            ("date", "Ngày Tháng", 105, "center"),
-            ("process", "Công Đoạn", 95, "center"),
-            ("product", "Sản Phẩm (Model/PWB)", 170, "center"),
-            ("machine", "Máy Móc / Line", 115, "center"),
-            ("tot", "SL Kiểm", 90, "center"),
-            ("def", "SL Lỗi", 85, "center"),
-            ("rate", "Tỷ Lệ (%)", 90, "center"),
-            ("resp", "Người Chịu TN", 140, "center"),
-            ("pic", "Người Phụ Trách", 130, "center"),
-            ("desc", "Mô Tả Hiện Tượng Lỗi", 280, "center"),
-            ("cause", "Nguyên Nhân", 250, "center"),
-            ("counter", "Biện Pháp Cải Tiến", 280, "center"),
-            ("sop", "Tiêu Chuẩn SOP", 125, "center"),
-            ("prog", "Tiến Độ", 125, "center"),
-            ("notes", "Ghi Chú", 180, "center")
+            ("stt", "STT", 55, "center"),
+            ("date", "Ngày Tháng", 115, "center"),
+            ("process", "Công Đoạn", 105, "center"),
+            ("product", "Sản Phẩm (Model/PWB)", 185, "center"),
+            ("machine", "Máy Móc / Line", 125, "center"),
+            ("tot", "SL Kiểm", 95, "center"),
+            ("def", "SL Lỗi", 90, "center"),
+            ("rate", "Tỷ Lệ (%)", 95, "center"),
+            ("resp", "Người Chịu TN", 150, "center"),
+            ("pic", "Người Phụ Trách", 140, "center"),
+            ("desc", "Mô Tả Hiện Tượng Lỗi", 300, "center"),
+            ("cause", "Nguyên Nhân", 260, "center"),
+            ("counter", "Biện Pháp Cải Tiến", 300, "center"),
+            ("sop", "Tiêu Chuẩn SOP", 135, "center"),
+            ("prog", "Tiến Độ", 135, "center"),
+            ("notes", "Ghi Chú", 200, "center")
         ]
 
-        for col_id, col_name, col_w, col_align in headers_meta:
+        for col_id, col_name, col_w, _ in headers_meta:
             self.tree.heading(col_id, text=col_name, anchor="center")
-            self.tree.column(col_id, width=col_w, anchor="center", minwidth=45)
+            self.tree.column(col_id, width=col_w, anchor="center", minwidth=50)
 
         vsb = ttk.Scrollbar(tree_container, orient="vertical", command=self.tree.yview)
         hsb = ttk.Scrollbar(tree_container, orient="horizontal", command=self.tree.xview)
@@ -1986,14 +1990,14 @@ class AnomalyReportView(ctk.CTkFrame):
                         background=tree_bg,
                         fieldbackground=tree_bg,
                         foreground=tree_fg,
-                        rowheight=56,
-                        font=("Segoe UI", 10),
+                        rowheight=60,
+                        font=("Segoe UI", 12),
                         borderwidth=0)
         style.configure("Anomaly.Treeview.Heading",
                         background=hdr_bg,
                         foreground=hdr_fg,
-                        font=("Segoe UI", 9, "bold"),
-                        padding=4)
+                        font=("Segoe UI", 12, "bold"),
+                        padding=6)
         style.map("Anomaly.Treeview",
                   background=[("selected", sel_bg)],
                   foreground=[("selected", sel_fg)])
