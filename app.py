@@ -5851,6 +5851,8 @@ class BOMExtractorApp(ctk.CTk):
             self.view_compare.update_language()
         if hasattr(self, "view_model_compare"):
             self.view_model_compare.update_language()
+        if hasattr(self, "view_anomaly"):
+            self.view_anomaly.update_language(self.current_lang)
 
         # Left panel texts
         self.lbl_sec_queue.configure(text=self.t("sec_queue"))
