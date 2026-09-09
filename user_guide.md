@@ -146,21 +146,33 @@ Khi nhấp chuột vào bất kỳ linh kiện nào trong danh sách sai khác (
 
 ---
 
-## 5. BẢNG TỔNG HỢP PHÍM TẮT & THAO TÁC NHANH
+## 5. CHỨC NĂNG 4: SO SÁNH 2 BOM CÙNG MODEL KHÁC SERIES (FAI INSPECTION)
+
+Phân hệ chuyên biệt phục vụ công tác kiểm tra đầu tiên (FAI - First Article Inspection) và kiểm soát thay đổi linh kiện giữa 2 Series của cùng một Model:
+- Hỗ trợ cả **PDF Bóc Tách Đa Cấp ERP** (多階材料用量清單列印) và **Excel BOM** (`.xlsx`, `.xls`).
+- **Giao diện bảng toàn màn hình**: Tối ưu hóa không gian làm việc cho QC, loại bỏ sơ đồ bản vẽ để tập trung tối đa vào danh mục và chỉ dẫn kiểm tra FAI.
+- **QC Focus Checklist**: Tự động lọc ra chỉ những linh kiện có sự thay đổi (Thêm mới, Bỏ trống DNP, Đổi mã vật tư) để QC kiểm tra trọng tâm, không cần rà soát lại các linh kiện trùng khớp.
+- **Tương tác đổi trạng thái kiểm tra**: Nhấp chuột trực tiếp vào từng dòng để chuyển đổi trạng thái `⏳ Chờ kiểm` ➔ `✅ ĐÃ DUYỆT (OK)` ➔ `❌ LỖI (NG)`.
+- **Thanh tiến độ kiểm tra FAI**: Tự động tính toán tỷ lệ % linh kiện đã kiểm duyệt thời gian thực.
+- **Xuất Biên bản FAI Excel**: Xuất file báo cáo chi tiết có chỉ dẫn hành động (Action Guide) và trạng thái duyệt cho bộ phận QC & SMT.
+
+---
+
+## 6. BẢNG TỔNG HỢP PHÍM TẮT & THAO TÁC NHANH
 
 | Thao Tác | Hành Động | Tác Dụng |
 |:---|:---|:---|
 | **Kéo Thả File** | Kéo file từ Desktop / Explorer vào app | Nạp nhanh file PDF hoặc Excel vào hệ thống |
-| **Kéo Chuột Trái (B1)** | Kéo tại thanh phân chia rèm `◂||▸` | Thay đổi tỉ lệ so sánh rèm giữa Model A và Model B |
-| **Kéo Chuột Trái (B1)** | Kéo ngoài phạm vi thanh chia rèm | Kéo rê (Pan) bản vẽ sang trái/phải/lên/xuống tự do |
+| **Kéo Chuột Trái (B1)** | Kéo tại thanh phân chia rèm `◂||▸` | Thay đổi tỉ lệ so sánh rèm giữa Model A và Model B (Chức năng 3) |
+| **Kéo Chuột Trái (B1)** | Kéo ngoài phạm vi thanh chia rèm | Kéo rê (Pan) bản vẽ sang trái/phải/lên/xuống tự do (Chức năng 3) |
 | **Chuột Giữa (B2)** | Nhấn giữ chuột giữa và di chuyển | Di chuyển bản vẽ không bị phụ thuộc vào vị trí chuột |
 | **Cuộn Chuột** | Lăn bánh xe cuộn chuột trên Canvas | Cuộn theo chiều dọc của bản vẽ |
-| **Bấm Đúp Vào Hàng** | Nhấp đúp chuột vào linh kiện trên bảng | Mở cửa sổ xem bản vẽ toàn màn hình (Fullscreen) |
+| **Bấm Đúp Vào Hàng** | Nhấp đúp chuột vào linh kiện trên bảng | Xem thông tin chi tiết linh kiện & quy cách |
 | **Phím Tìm Kiếm** | Gõ ký tự vào ô tìm kiếm | Lọc tức thì theo mã linh kiện hoặc vị trí |
 
 ---
 
-## 6. LƯU Ý KỸ THUẬT QUAN TRỌNG
+## 7. LƯU Ý KỸ THUẬT QUAN TRỌNG
 
 1. **Giới Hạn Dung Lượng Tệp**:
    - Hệ thống đặt ngưỡng an toàn **tối đa 10 MB cho mỗi tệp PDF**. Nếu tệp vượt quá 10 MB, ứng dụng sẽ cảnh báo để bảo vệ bộ nhớ RAM máy tính, tránh tình trạng đơ ứng dụng trong quá trình kết xuất đồ họa độ phân giải cao.

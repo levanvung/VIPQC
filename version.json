@@ -1,8 +1,8 @@
 {
-  "version": "2.2.0",
-  "release_date": "2026-09-08",
-  "title": "VIPQC AI v2.2.0 — So Sánh 2 BOM & Bản Vẽ Khoanh Vùng QC (FAI Inspection)",
-  "changelog": "- Tích hợp Tab 4: So Sánh 2 BOM cùng Model khác Series (Hỗ trợ PDF ERP & Excel)\n- Tải lên Bản vẽ PCB Working Manual & Khoanh vùng viền nổi bật (Border Highlight: Xanh lá Gắn mới, Đỏ Bỏ trống DNP, Cam Đổi loại)\n- Hiệu ứng Cyberpunk AI Scan HUD với đồng hồ vi điện tử và tiến trình quét thông minh\n- Đồng bộ tương tác 2 chiều giữa Bảng kiểm tra QC và Bản vẽ PCB (Spotlight Crosshair reticle, Zoom/Pan/Rotate 90°, Đổi trạng thái kiểm tra)\n- Bảng kiểm soát QC Focus Checklist tương tác & Xuất Báo cáo FAI chuyên nghiệp cho QC & SMT",
+  "version": "2.2.1",
+  "release_date": "2026-09-09",
+  "title": "VIPQC AI v2.2.1 — Tối ưu hóa giao diện So Sánh 2 BOM toàn màn hình",
+  "changelog": "- Tối ưu hóa chức năng So Sánh 2 BOM: Loại bỏ phần hiển thị sơ đồ bản vẽ, mở rộng bảng dữ liệu toàn màn hình giúp QC thao tác kiểm tra nhanh chóng và thuận tiện hơn\n- Bộ lọc phân loại linh kiện linh hoạt (🎯 Cần chú ý, 🟢 Thêm mới, 🔴 Bỏ trống DNP, 🟡 Đổi mã vật tư, ⚪ Dùng chung, Tất cả)\n- Hỗ trợ đổi trạng thái kiểm tra trực tiếp (⏳ Chờ kiểm ➔ ✅ ĐÃ DUYỆT ➔ ❌ LỖI NG) và cập nhật thanh tiến độ FAI tức thời\n- Xuất biên bản kiểm tra FAI & đối chiếu BOM ra file Excel chuyên nghiệp",
   "download_url": "https://github.com/levanvung/VIPQC/raw/master/VIPQC%20AI.exe",
   "release_url": "https://github.com/levanvung/VIPQC"
 }
