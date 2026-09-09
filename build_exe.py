@@ -60,10 +60,14 @@ def build():
         "--hidden-import", "series_bom_comparator",
         "--hidden-import", "series_bom_exporter",
         "--hidden-import", "updater",
+        "--hidden-import", "anomaly_service",
+        "--hidden-import", "anomaly_view",
     ]
 
     if os.path.exists("version.json"):
         cmd.extend(["--add-data", f"version.json{os.pathsep}."])
+    if os.path.exists("cloud_config.json"):
+        cmd.extend(["--add-data", f"cloud_config.json{os.pathsep}."])
 
     if ctk_data:
         cmd += ["--add-data", ctk_data]

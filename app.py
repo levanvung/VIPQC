@@ -51,6 +51,7 @@ from model_comparator import (
 )
 import series_bom_comparator as sbc
 import series_bom_exporter as sbe
+from anomaly_view import AnomalyReportView
 
 def resource_path(relative_path: str) -> str:
     """Get absolute path to resource, works for dev and for PyInstaller bundle."""
@@ -229,6 +230,7 @@ I18N = {
         },
         "tab_model_comp": "🔀 So Sánh 2 Model",
         "tab_series_bom": "📑 So Sánh 2 BOM",
+        "tab_anomaly": "⚠️ Báo Cáo Bất Thường",
         "card_model_a_title": "1. MODEL A (BẢN GỐC / SERIES 1)",
         "card_model_b_title": "2. MODEL B (BẢN MỚI / SERIES 2)",
         "btn_choose_model_a": "📄 Chọn PDF Model A",
@@ -385,6 +387,7 @@ I18N = {
         },
         "tab_model_comp": "🔀 机型图纸比对",
         "tab_series_bom": "📑 BOM系列比对",
+        "tab_anomaly": "⚠️ 异常报告",
         "card_model_a_title": "1. 机型 A (基准 / 系列 1)",
         "card_model_b_title": "2. 机型 B (变更 / 系列 2)",
         "btn_choose_model_a": "📄 选择机型 A (PDF)",
@@ -538,6 +541,7 @@ I18N = {
         },
         "tab_model_comp": "🔀 Model Series Diff",
         "tab_series_bom": "📑 Series BOM Diff",
+        "tab_anomaly": "⚠️ Anomaly Report",
         "card_model_a_title": "1. MODEL A (BASE / SERIES 1)",
         "card_model_b_title": "2. MODEL B (NEW / SERIES 2)",
         "btn_choose_model_a": "📄 Choose Model A PDF",
@@ -5069,6 +5073,10 @@ class BOMExtractorApp(ctk.CTk):
         self.view_series_bom_compare = SeriesBOMCompareView(self.main_container, self)
         # (Initially hidden, shown when nav changes to Series BOM Compare)
 
+        # ── TAB 5: ANOMALY REPORT VIEW ────────────────────────────────────────
+        self.view_anomaly = AnomalyReportView(self.main_container, self)
+        # (Initially hidden, shown when nav changes to Anomaly Report)
+
         # === BOTTOM STATUS BAR ================================================
         status_bar = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=0, height=34)
         status_bar.pack(fill="x", side="bottom")
@@ -5152,7 +5160,21 @@ class BOMExtractorApp(ctk.CTk):
             hover_color=BG_HOVER,
             command=lambda: self._set_nav_active("series_bom")
         )
-        self.btn_nav_series_bom.pack(fill="x", padx=10, pady=(0, 10))
+        self.btn_nav_series_bom.pack(fill="x", padx=10, pady=(0, 6))
+
+        self.btn_nav_anomaly = ctk.CTkButton(
+            parent,
+            text=self.t("tab_anomaly"),
+            font=("Segoe UI", 11, "bold"),
+            height=44,
+            corner_radius=8,
+            anchor="w",
+            fg_color="transparent",
+            text_color=TEXT_PRIMARY,
+            hover_color=BG_HOVER,
+            command=lambda: self._set_nav_active("anomaly")
+        )
+        self.btn_nav_anomaly.pack(fill="x", padx=10, pady=(0, 10))
 
         # Subtle divider
         ctk.CTkFrame(parent, fg_color=BORDER_CLR, height=1).pack(fill="x", padx=10, pady=4)
@@ -5548,6 +5570,8 @@ class BOMExtractorApp(ctk.CTk):
             self.view_model_compare.apply_theme(is_dark)
         if hasattr(self, "view_series_bom_compare"):
             self.view_series_bom_compare._apply_tree_tags()
+        if hasattr(self, "view_anomaly"):
+            self.view_anomaly.apply_theme(is_dark)
 
         # Sidebar & Copyright theme
         if hasattr(self, "sidebar"):
@@ -5619,10 +5643,14 @@ class BOMExtractorApp(ctk.CTk):
                 self.btn_nav_model_comp.configure(fg_color=inactive_fg, text_color=inactive_txt, hover_color=hover_col)
             if hasattr(self, "btn_nav_series_bom"):
                 self.btn_nav_series_bom.configure(fg_color=inactive_fg, text_color=inactive_txt, hover_color=hover_col)
+            if hasattr(self, "btn_nav_anomaly"):
+                self.btn_nav_anomaly.configure(fg_color=inactive_fg, text_color=inactive_txt, hover_color=hover_col)
             if hasattr(self, "view_model_compare"):
                 self.view_model_compare.pack_forget()
             if hasattr(self, "view_series_bom_compare"):
                 self.view_series_bom_compare.pack_forget()
+            if hasattr(self, "view_anomaly"):
+                self.view_anomaly.pack_forget()
             self.view_compare.pack_forget()
             self.view_extract.pack(fill="both", expand=True)
             self._update_badges_for_extract()
@@ -5634,10 +5662,14 @@ class BOMExtractorApp(ctk.CTk):
                 self.btn_nav_model_comp.configure(fg_color=inactive_fg, text_color=inactive_txt, hover_color=hover_col)
             if hasattr(self, "btn_nav_series_bom"):
                 self.btn_nav_series_bom.configure(fg_color=inactive_fg, text_color=inactive_txt, hover_color=hover_col)
+            if hasattr(self, "btn_nav_anomaly"):
+                self.btn_nav_anomaly.configure(fg_color=inactive_fg, text_color=inactive_txt, hover_color=hover_col)
             if hasattr(self, "view_model_compare"):
                 self.view_model_compare.pack_forget()
             if hasattr(self, "view_series_bom_compare"):
                 self.view_series_bom_compare.pack_forget()
+            if hasattr(self, "view_anomaly"):
+                self.view_anomaly.pack_forget()
             self.view_extract.pack_forget()
             self.view_compare.pack(fill="both", expand=True)
             self._update_badges_for_compare()
@@ -5649,10 +5681,14 @@ class BOMExtractorApp(ctk.CTk):
                 self.btn_nav_model_comp.configure(fg_color=active_fg, text_color=active_txt, hover_color=("#0F766E", "#00A88C"))
             if hasattr(self, "btn_nav_series_bom"):
                 self.btn_nav_series_bom.configure(fg_color=inactive_fg, text_color=inactive_txt, hover_color=hover_col)
+            if hasattr(self, "btn_nav_anomaly"):
+                self.btn_nav_anomaly.configure(fg_color=inactive_fg, text_color=inactive_txt, hover_color=hover_col)
             self.view_extract.pack_forget()
             self.view_compare.pack_forget()
             if hasattr(self, "view_series_bom_compare"):
                 self.view_series_bom_compare.pack_forget()
+            if hasattr(self, "view_anomaly"):
+                self.view_anomaly.pack_forget()
             if hasattr(self, "view_model_compare"):
                 self.view_model_compare.pack(fill="both", expand=True)
             self._update_badges_for_model_compare()
@@ -5664,13 +5700,36 @@ class BOMExtractorApp(ctk.CTk):
                 self.btn_nav_model_comp.configure(fg_color=inactive_fg, text_color=inactive_txt, hover_color=hover_col)
             if hasattr(self, "btn_nav_series_bom"):
                 self.btn_nav_series_bom.configure(fg_color=active_fg, text_color=active_txt, hover_color=("#0F766E", "#00A88C"))
+            if hasattr(self, "btn_nav_anomaly"):
+                self.btn_nav_anomaly.configure(fg_color=inactive_fg, text_color=inactive_txt, hover_color=hover_col)
+            self.view_extract.pack_forget()
+            self.view_compare.pack_forget()
+            if hasattr(self, "view_model_compare"):
+                self.view_model_compare.pack_forget()
+            if hasattr(self, "view_anomaly"):
+                self.view_anomaly.pack_forget()
+            if hasattr(self, "view_series_bom_compare"):
+                self.view_series_bom_compare.pack(fill="both", expand=True)
+            self.set_status("Đã chuyển sang chế độ So Sánh 2 BOM (Series).")
+        elif mode == "anomaly":
+            self.btn_nav_extract.configure(fg_color=inactive_fg, text_color=inactive_txt, hover_color=hover_col)
+            self.btn_nav_compare.configure(fg_color=inactive_fg, text_color=inactive_txt, hover_color=hover_col)
+            if hasattr(self, "btn_nav_model_comp"):
+                self.btn_nav_model_comp.configure(fg_color=inactive_fg, text_color=inactive_txt, hover_color=hover_col)
+            if hasattr(self, "btn_nav_series_bom"):
+                self.btn_nav_series_bom.configure(fg_color=inactive_fg, text_color=inactive_txt, hover_color=hover_col)
+            if hasattr(self, "btn_nav_anomaly"):
+                self.btn_nav_anomaly.configure(fg_color=active_fg, text_color=active_txt, hover_color=("#0F766E", "#00A88C"))
             self.view_extract.pack_forget()
             self.view_compare.pack_forget()
             if hasattr(self, "view_model_compare"):
                 self.view_model_compare.pack_forget()
             if hasattr(self, "view_series_bom_compare"):
-                self.view_series_bom_compare.pack(fill="both", expand=True)
-            self.set_status("Đã chuyển sang chế độ So Sánh 2 BOM (Series).")
+                self.view_series_bom_compare.pack_forget()
+            if hasattr(self, "view_anomaly"):
+                self.view_anomaly.pack(fill="both", expand=True)
+            self._update_badges_for_anomaly()
+            self.set_status("Đã chuyển sang chế độ Báo Cáo Bất Thường (Cloud Supabase).")
 
     def _on_nav_change(self, choice: str):
         """Compatibility method for switching navigation."""
@@ -5720,6 +5779,23 @@ class BOMExtractorApp(ctk.CTk):
         self.badge_qty.set_label(self.t("badge_qty"))
         self._refresh_badges()
 
+    def _update_badges_for_anomaly(self):
+        """Updates RGB stat badges to reflect Anomaly Reports statistics."""
+        self.badge_files.set_label("TỔNG BÁO CÁO")
+        self.badge_items.set_label("ĐÃ HOÀN THÀNH")
+        self.badge_qty.set_label("ĐANG XỬ LÝ")
+        if hasattr(self, "view_anomaly") and self.view_anomaly.all_reports:
+            reps = self.view_anomaly.all_reports
+            done_cnt = sum(1 for r in reps if "hoàn thành" in str(r.get("progress", "")).lower())
+            in_prog = sum(1 for r in reps if "đang" in str(r.get("progress", "")).lower())
+            self.badge_files.set_value(len(reps))
+            self.badge_items.set_value(done_cnt)
+            self.badge_qty.set_value(in_prog)
+        else:
+            self.badge_files.set_value(0)
+            self.badge_items.set_value(0)
+            self.badge_qty.set_value(0)
+
     def set_status(self, text: str):
         """Updates the text on the bottom status bar."""
         if hasattr(self, "lbl_status"):
@@ -5751,6 +5827,8 @@ class BOMExtractorApp(ctk.CTk):
             self.btn_nav_model_comp.configure(text=self.t("tab_model_comp"))
         if hasattr(self, "btn_nav_series_bom"):
             self.btn_nav_series_bom.configure(text=self.t("tab_series_bom"))
+        if hasattr(self, "btn_nav_anomaly"):
+            self.btn_nav_anomaly.configure(text=self.t("tab_anomaly"))
         if hasattr(self, "lbl_sidebar_c_badge"):
             self.lbl_sidebar_c_badge.configure(text="🛡️  " + self.t("copyright_title") + "  🛡️")
         if hasattr(self, "lbl_sidebar_author"):
@@ -5763,6 +5841,8 @@ class BOMExtractorApp(ctk.CTk):
             self._update_badges_for_compare()
         elif self.current_nav == "model_comp":
             self._update_badges_for_model_compare()
+        elif self.current_nav == "anomaly":
+            self._update_badges_for_anomaly()
         else:
             self._update_badges_for_extract()
 

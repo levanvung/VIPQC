@@ -1,8 +1,8 @@
 {
-  "version": "2.2.6",
+  "version": "2.2.7",
   "release_date": "2026-09-09",
-  "title": "VIPQC AI v2.2.6 — Tinh gọn phân hệ So Sánh 2 BOM FAI",
-  "changelog": "- Loại bỏ tính năng upload bản vẽ ở phân hệ So Sánh 2 BOM, giúp giao diện tối giản, tập trung 100% vào dữ liệu FAI\n- Loại bỏ popup làm phiền sau khi đối chiếu BOM\n- Hỗ trợ đọc file Excel BOM đa Sheet tự động và bao quát toàn bộ danh mục vật tư Non-SMT\n- Tối ưu hóa tốc độ xuất biên bản kiểm tra FAI Excel",
+  "title": "VIPQC AI v2.2.7 — Tích hợp Báo Cáo Bất Thường Cloud & Khắc phục Trình Cập Nhật",
+  "changelog": "- Tích hợp phân hệ Báo Cáo Bất Thường (18 cột chuẩn QC) kết nối trực tiếp Cloud Supabase\n- Hỗ trợ tải, nén ảnh tự động và dán ảnh trực tiếp từ clipboard (Ctrl+V) kèm phóng to ảnh lỗi\n- Phân quyền thao tác Thêm / Sửa / Xóa bằng Mật khẩu Quản trị (Admin)\n- Nâng cấp cơ chế tự động cập nhật ngầm qua PowerShell (không bao giờ bị treo cửa sổ đen cmd)\n- Tự động vượt lỗi chứng chỉ SSL trên máy tính nhà máy có Firewall / Proxy",
   "download_url": "https://github.com/levanvung/VIPQC/raw/master/VIPQC%20AI.exe",
   "release_url": "https://github.com/levanvung/VIPQC"
 }

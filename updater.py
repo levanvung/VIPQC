@@ -12,10 +12,29 @@ import time
 import subprocess
 import urllib.request
 import urllib.error
+import ssl
 
-CURRENT_VERSION = "2.2.4"
+CURRENT_VERSION = "2.2.7"
 GITHUB_OWNER = "levanvung"
 GITHUB_REPO = "VIPQC"
+
+
+def _get_ssl_context():
+    """
+    Returns an SSL context that bypasses corporate proxy or missing root CA errors.
+    Prevents [SSL: CERTIFICATE_VERIFY_FAILED] on factory / corporate PCs.
+    """
+    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+    except Exception:
+        pass
+    try:
+        return ssl._create_unverified_context()
+    except Exception:
+        return None
 
 # Primary raw descriptor (No GitHub API rate limit)
 GITHUB_RAW_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/master/version.json"
@@ -82,9 +101,10 @@ def check_for_updates(timeout: int = 5) -> dict:
     # 1. Try raw version.json first (fastest, no rate limits)
     headers = {"User-Agent": f"VIPQC-AI-Updater/{CURRENT_VERSION}"}
     raw_data = None
+    ssl_ctx = _get_ssl_context()
     try:
         req = urllib.request.Request(GITHUB_RAW_VERSION_URL, headers=headers)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx) as resp:
             if resp.status == 200:
                 raw_data = json.loads(resp.read().decode("utf-8"))
     except Exception as ex_raw:
@@ -104,7 +124,7 @@ def check_for_updates(timeout: int = 5) -> dict:
     # 2. Fallback: Try GitHub Releases API
     try:
         req = urllib.request.Request(GITHUB_RELEASES_API_URL, headers=headers)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx) as resp:
             if resp.status == 200:
                 api_data = json.loads(resp.read().decode("utf-8"))
                 tag_ver = api_data.get("tag_name", "")
@@ -131,14 +151,15 @@ def check_for_updates(timeout: int = 5) -> dict:
 def download_update_file(download_url: str, target_file: str, progress_callback=None, cancel_event=None) -> bool:
     """
     Downloads the update file in chunks and calls progress_callback(pct, downloaded_bytes, total_bytes).
-    Returns True if downloaded successfully.
+    Uses SSL bypass context to avoid corporate network [SSL: CERTIFICATE_VERIFY_FAILED] issues.
     """
     headers = {"User-Agent": f"VIPQC-AI-Updater/{CURRENT_VERSION}"}
     req = urllib.request.Request(download_url, headers=headers)
+    ssl_ctx = _get_ssl_context()
 
     os.makedirs(os.path.dirname(os.path.abspath(target_file)), exist_ok=True)
 
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with urllib.request.urlopen(req, timeout=60, context=ssl_ctx) as resp:
         total_size = int(resp.headers.get("Content-Length", 0))
         downloaded = 0
         chunk_size = 64 * 1024  # 64 KB
@@ -174,66 +195,74 @@ def get_target_exe_path() -> str:
 
 def apply_update_and_restart(new_exe_path: str):
     """
-    Spawns a detached Windows batch script to:
-      1. Wait for current VIPQC process to exit.
+    Spawns a detached Windows background process to:
+      1. Wait for current VIPQC process to exit and release file locks.
       2. Overwrite the target executable with the newly downloaded executable.
       3. Launch the new executable.
-      4. Self-delete the batch script.
+    Runs completely silent without opening any black CMD windows.
     Then immediately exits the current process.
     """
     target_exe = get_target_exe_path()
-    current_pid = os.getpid()
-
     updater_dir = os.path.dirname(target_exe)
-    bat_path = os.path.join(updater_dir, "_update_launcher.bat")
+    alt_exe = os.path.join(updater_dir, "BOM_Extractor.exe")
 
-    # Write batch updater script
-    bat_content = f"""@echo off
-setlocal
-set "PID={current_pid}"
-set "NEW_EXE={new_exe_path}"
-set "TARGET_EXE={target_exe}"
+    # Clean up old temporary bat if exists
+    old_bat = os.path.join(updater_dir, "_update_launcher.bat")
+    if os.path.exists(old_bat):
+        try:
+            os.remove(old_bat)
+        except Exception:
+            pass
 
-:: Wait up to 10 seconds for process to exit
-set count=0
-:wait_loop
-timeout /t 1 /nobreak > nul
-set /a count+=1
-tasklist /fi "pid eq %PID%" 2>nul | findstr "%PID%" > nul
-if not errorlevel 1 (
-    if %count% leq 10 goto wait_loop
-)
-
-:: Copy new executable over current executable
-copy /y "%NEW_EXE%" "%TARGET_EXE%" > nul
-if exist "%NEW_EXE%" del /f /q "%NEW_EXE%" > nul
-
-:: Also sync BOM_Extractor.exe if it exists in same folder
-set "ALT_EXE={os.path.join(updater_dir, 'BOM_Extractor.exe')}"
-if exist "%ALT_EXE%" (
-    copy /y "%TARGET_EXE%" "%ALT_EXE%" > nul
-)
-
-:: Launch updated application
-start "" "%TARGET_EXE%"
-
-:: Self delete this batch script
-(goto) 2>nul & del /f /q "%~f0"
-"""
-
-    with open(bat_path, "w", encoding="utf-8", errors="ignore") as f:
-        f.write(bat_content)
-
-    # Launch batch script completely detached
     CREATE_NO_WINDOW = 0x08000000
     DETACHED_PROCESS = 0x00000008
     flags = CREATE_NO_WINDOW | DETACHED_PROCESS
 
-    subprocess.Popen(
-        ["cmd.exe", "/c", bat_path],
-        creationflags=flags,
-        close_fds=True
+    # PowerShell in-place updater (Silent, no CMD window, retries until file unlocked)
+    ps_script = (
+        f"$target = '{target_exe}'; "
+        f"$new = '{new_exe_path}'; "
+        f"$alt = '{alt_exe}'; "
+        f"Start-Sleep -Milliseconds 800; "
+        f"for ($i = 0; $i -lt 30; $i++) {{ "
+        f"  try {{ "
+        f"    Copy-Item -LiteralPath $new -Destination $target -Force -ErrorAction Stop; "
+        f"    Remove-Item -LiteralPath $new -Force -ErrorAction SilentlyContinue; "
+        f"    if (Test-Path -LiteralPath $alt) {{ Copy-Item -LiteralPath $target -Destination $alt -Force -ErrorAction SilentlyContinue }}; "
+        f"    Start-Process -FilePath $target; "
+        f"    break; "
+        f"  }} catch {{ "
+        f"    Start-Sleep -Milliseconds 800; "
+        f"  }} "
+        f"}}"
     )
 
-    # Hard exit current process
+    try:
+        subprocess.Popen(
+            ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_script],
+            creationflags=flags
+        )
+    except Exception:
+        # Fallback to simple silent batch file
+        bat_content = f"""@echo off
+timeout /t 2 /nobreak > nul
+:retry_copy
+copy /y "{new_exe_path}" "{target_exe}" > nul
+if errorlevel 1 (
+    timeout /t 1 /nobreak > nul
+    goto retry_copy
+)
+if exist "{new_exe_path}" del /f /q "{new_exe_path}" > nul
+if exist "{alt_exe}" copy /y "{target_exe}" "{alt_exe}" > nul
+start "" "{target_exe}"
+del /f /q "%~f0"
+"""
+        try:
+            with open(old_bat, "w", encoding="utf-8", errors="ignore") as f:
+                f.write(bat_content)
+            subprocess.Popen(["cmd.exe", "/c", old_bat], creationflags=flags)
+        except Exception:
+            pass
+
+    # Hard exit current process so target_exe is unlocked immediately
     os._exit(0)

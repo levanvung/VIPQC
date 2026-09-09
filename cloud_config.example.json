@@ -1,0 +1,7 @@
+{
+  "supabase_url": "https://your-project.supabase.co",
+  "anon_key": "your-anon-public-key-here",
+  "service_key": "",
+  "bucket_name": "anomaly-images",
+  "admin_password_hash": "69623787a01183df78e22b529263bd30f7e1f6e7178fe59603e856b83a37f5e1"
+}
