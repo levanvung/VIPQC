@@ -4220,6 +4220,12 @@ class SeriesBOMDrawingWindow(ctk.CTkToplevel):
             font=("Segoe UI", 9, "bold"), text_color=TEXT_MUTED
         ).pack(side="right", padx=16)
 
+        self.lbl_scan = ctk.CTkLabel(
+            top, text="SCAN: 0/0 vị trí",
+            font=("Consolas", 9, "bold"), text_color=ACCENT_AMBER
+        )
+        self.lbl_scan.pack(side="right", padx=(0, 12))
+
         body = ctk.CTkFrame(self, fg_color="#0B0F1A", corner_radius=0)
         body.pack(fill="both", expand=True, padx=10, pady=(8, 10))
         self.vsb = tk.Scrollbar(body, orient="vertical")
@@ -4252,12 +4258,13 @@ class SeriesBOMDrawingWindow(ctk.CTkToplevel):
         if not self.page_infos or not self.comparison_result:
             return
         focus_items = self.comparison_result.get("qc_focus_items", [])
-        image, _ = sbc.render_annotated_drawing_page(
+        image, located = sbc.render_annotated_drawing_page(
             self.pdf_path, self.page_index, focus_items,
             active_loc=self.active_loc, zoom=self.zoom
         )
         if image is None:
             return
+        self.lbl_scan.configure(text=f"SCAN: {len(located)}/{len(focus_items)} vị trí")
         self.tk_image = ImageTk.PhotoImage(image)
         self.canvas.delete("all")
         self.canvas.create_image(12, 12, image=self.tk_image, anchor="nw")
@@ -4295,6 +4302,7 @@ class SeriesBOMCompareView(ctk.CTkFrame):
         self.qc_status_map = {}  # loc -> 'OK', 'NG', 'PENDING'
         self.active_loc = None
         self.drawing_window = None
+        self.drawing_path = None
 
         self._loading_hud = None
 
@@ -4493,9 +4501,9 @@ class SeriesBOMCompareView(ctk.CTkFrame):
         self.lbl_qc_progress.pack(side="right", padx=10)
 
         self.btn_open_drawing = ctk.CTkButton(
-            qc_head, text="📐 Xem bản vẽ QC", font=("Segoe UI", 9, "bold"),
+            qc_head, text="📐 Upload bản vẽ PCB", font=("Segoe UI", 9, "bold"),
             height=24, width=136, fg_color=ACCENT_BLUE, hover_color="#1D4ED8",
-            state="disabled", command=self._open_drawing_window
+            state="disabled", command=self._upload_drawing
         )
         self.btn_open_drawing.pack(side="right", padx=(4, 0))
 
@@ -4716,6 +4724,7 @@ class SeriesBOMCompareView(ctk.CTkFrame):
         self.comparison_result = None
         self.qc_status_map = {}
         self.active_loc = None
+        self.drawing_path = None
 
         self.lbl_file_a_name.configure(text="Chưa chọn BOM Series A")
         self.lbl_file_a_meta.configure(text="Model: — | Series: —")
@@ -4778,8 +4787,8 @@ class SeriesBOMCompareView(ctk.CTkFrame):
         self.btn_run_compare.configure(state="normal", text="⚡ SO SÁNH 2 BOM")
         self.btn_export_fai.configure(state="normal")
         self.is_comparing = False
-        drawing_path = self.file_b if str(self.file_b).lower().endswith(".pdf") else self.file_a
-        if drawing_path and os.path.exists(drawing_path):
+        self.drawing_path = None
+        if result.get("qc_focus_items"):
             self.btn_open_drawing.configure(state="normal")
 
         s = result["summary"]
@@ -4813,10 +4822,38 @@ class SeriesBOMCompareView(ctk.CTkFrame):
         self.filter_var.set("🎯 Cần chú ý")
         self._populate_table()
 
-        if drawing_path and result.get("qc_focus_items"):
-            self.after(250, self._open_drawing_window)
+        if result.get("qc_focus_items"):
+            self.after(250, self._ask_upload_drawing)
 
         self.app.set_status(f"Hoàn thành so sánh 2 BOM! {s['focus_count']} linh kiện cần chú ý kiểm tra.")
+
+    def _ask_upload_drawing(self):
+        should_upload = messagebox.askyesno(
+            "Upload bản vẽ PCB",
+            "Đã tìm thấy các vị trí cần chú ý trong BOM.\n\n"
+            "Bạn có muốn upload bản vẽ PCB để quét và đánh dấu contour các vị trí này không?"
+        )
+        if should_upload:
+            self._upload_drawing()
+
+    def _upload_drawing(self):
+        drawing_path = filedialog.askopenfilename(
+            title="Chọn bản vẽ PCB để quét vị trí QC",
+            filetypes=[("PCB Drawing PDF", "*.pdf")]
+        )
+        if not drawing_path:
+            return
+
+        drawing_path = os.path.normpath(drawing_path)
+        if os.path.getsize(drawing_path) > MAX_FILE_SIZE_BYTES:
+            messagebox.showwarning(
+                "File quá lớn",
+                f"File bản vẽ '{os.path.basename(drawing_path)}' vượt quá 10MB!"
+            )
+            return
+
+        self.drawing_path = drawing_path
+        self._open_drawing_window()
 
     def _open_drawing_window(self):
         if self.drawing_window and self.drawing_window.winfo_exists():
@@ -4824,11 +4861,11 @@ class SeriesBOMCompareView(ctk.CTkFrame):
             self.drawing_window.focus_force()
             return
 
-        pdf_path = self.file_b if str(self.file_b).lower().endswith(".pdf") else self.file_a
+        pdf_path = self.drawing_path
         if not pdf_path or not os.path.exists(pdf_path):
             messagebox.showinfo(
-                "Chưa có bản vẽ PDF",
-                "Cặp BOM hiện tại không có file PDF để hiển thị bản vẽ và đánh dấu vị trí."
+                "Chưa upload bản vẽ",
+                "Hãy upload riêng file bản vẽ PCB sau khi so sánh BOM."
             )
             return
         self.drawing_window = SeriesBOMDrawingWindow(

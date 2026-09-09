@@ -1,8 +1,8 @@
 {
-  "version": "2.2.3",
+  "version": "2.2.4",
   "release_date": "2026-09-09",
-  "title": "VIPQC AI v2.2.3 — Hiển thị điểm QC trên bản vẽ PCB",
-  "changelog": "- Tự mở bản vẽ PCB sau khi so sánh 2 BOM nếu có file PDF\n- Đánh dấu các vị trí Added, Removed/DNP và Modified trực tiếp trên bản vẽ\n- Click một dòng QC để spotlight vị trí tương ứng trên bản vẽ\n- Thêm chọn trang, zoom và chú giải màu cho cửa sổ kiểm tra bản vẽ",
+  "title": "VIPQC AI v2.2.4 — Upload bản vẽ và scan contour điểm QC",
+  "changelog": "- Sau khi so sánh BOM, hỏi người dùng có muốn upload bản vẽ PCB riêng hay không\n- Quét bản vẽ PDF và đánh dấu contour các vị trí Added, Removed/DNP và Modified\n- Không còn tự dùng PDF BOM làm bản vẽ hiển thị\n- Hiển thị số Ref đã scan được trên tổng số vị trí cần kiểm",
   "download_url": "https://github.com/levanvung/VIPQC/raw/master/VIPQC%20AI.exe",
   "release_url": "https://github.com/levanvung/VIPQC"
 }
