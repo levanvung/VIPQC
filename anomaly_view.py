@@ -16,6 +16,8 @@ Modern CustomTkinter GUI featuring:
 import os
 import io
 import math
+import hashlib
+import tempfile
 import threading
 from datetime import datetime
 import tkinter as tk
@@ -1348,8 +1350,111 @@ class AnomalyReportView(ctk.CTkFrame):
         self.selected_report: dict = None
         self.is_admin_session = False
 
+        # Thumbnail cache & high-performance image loading
+        self._thumb_cache: dict[str, ImageTk.PhotoImage] = {}
+        self._thumb_disk_cache_dir = os.path.join(tempfile.gettempdir(), "vipqc_anomaly_thumbs")
+        os.makedirs(self._thumb_disk_cache_dir, exist_ok=True)
+        self._img_no_photo: ImageTk.PhotoImage = None
+        self._img_loading_photo: ImageTk.PhotoImage = None
+        self._make_placeholder_images(is_dark=True)
+
         self._build_ui()
         self.refresh_data()
+
+    def _make_placeholder_images(self, is_dark: bool = True):
+        """Generates crisp 46x46 placeholder tiles for rows without images or while loading."""
+        tile_bg = (22, 29, 46, 255) if is_dark else (226, 232, 240, 255)
+        border_col = (42, 54, 80, 255) if is_dark else (203, 213, 225, 255)
+        icon_col = (100, 116, 139, 255) if is_dark else (148, 163, 184, 255)
+        teal_col = (13, 148, 136, 255) if is_dark else (15, 118, 110, 255)
+
+        # No Image Placeholder: dark tile with subtle dash
+        im_no = Image.new("RGBA", (46, 46), tile_bg)
+        d1 = ImageDraw.Draw(im_no)
+        d1.rectangle([0, 0, 45, 45], outline=border_col, width=1)
+        d1.line([(16, 23), (30, 23)], fill=icon_col, width=2)
+        self._img_no_photo = ImageTk.PhotoImage(im_no)
+
+        # Loading Placeholder: dark tile with dots indicator
+        im_load = Image.new("RGBA", (46, 46), tile_bg)
+        d2 = ImageDraw.Draw(im_load)
+        d2.rectangle([0, 0, 45, 45], outline=teal_col, width=1)
+        d2.text((12, 14), "...", fill=teal_col)
+        self._img_loading_photo = ImageTk.PhotoImage(im_load)
+
+    def _create_thumbnail_image(self, im: Image.Image, size=(46, 46)) -> Image.Image:
+        """Crops/fits image into a crisp, polished square thumbnail with subtle border."""
+        try:
+            from PIL import ImageOps
+            im = ImageOps.exif_transpose(im)
+        except Exception:
+            pass
+        im = im.convert("RGBA")
+        w, h = im.size
+        ratio = min(size[0] / max(w, 1), size[1] / max(h, 1))
+        new_w, new_h = max(1, int(w * ratio)), max(1, int(h * ratio))
+        im_resized = im.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+        bg = Image.new("RGBA", size, (28, 36, 56, 255))
+        ox = (size[0] - new_w) // 2
+        oy = (size[1] - new_h) // 2
+        bg.paste(im_resized, (ox, oy), im_resized)
+
+        # Draw subtle border
+        draw = ImageDraw.Draw(bg)
+        draw.rectangle([0, 0, size[0] - 1, size[1] - 1], outline=(42, 54, 80, 255), width=1)
+        return bg
+
+    def _get_or_load_thumb(self, url: str, report_id: str) -> ImageTk.PhotoImage:
+        """Returns cached PhotoImage or initiates async download and returns placeholder."""
+        if not url:
+            return self._img_no_photo
+
+        if url in self._thumb_cache:
+            return self._thumb_cache[url]
+
+        # Check local disk cache
+        h = hashlib.md5(url.encode("utf-8")).hexdigest()
+        disk_path = os.path.join(self._thumb_disk_cache_dir, f"{h}.png")
+        if os.path.exists(disk_path):
+            try:
+                im = Image.open(disk_path)
+                photo = ImageTk.PhotoImage(im)
+                self._thumb_cache[url] = photo
+                return photo
+            except Exception:
+                pass
+
+        # Async fetch from cloud
+        def _fetch():
+            try:
+                import urllib.request
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                ssl_ctx = svc.get_ssl_context()
+                with urllib.request.urlopen(req, timeout=12, context=ssl_ctx) as r:
+                    raw = r.read()
+                orig_im = Image.open(io.BytesIO(raw))
+                thumb_im = self._create_thumbnail_image(orig_im, (46, 46))
+                try:
+                    thumb_im.save(disk_path, "PNG")
+                except Exception:
+                    pass
+
+                def _apply():
+                    photo = ImageTk.PhotoImage(thumb_im)
+                    self._thumb_cache[url] = photo
+                    try:
+                        if self.tree.exists(report_id):
+                            self.tree.item(report_id, image=photo)
+                    except Exception:
+                        pass
+
+                safe_after(self, 0, _apply)
+            except Exception:
+                pass
+
+        threading.Thread(target=_fetch, daemon=True).start()
+        return self._img_loading_photo
 
     def _build_ui(self):
         # ── TOP ACTION & FILTER BAR ──────────────────────────────────────────
@@ -1460,11 +1565,11 @@ class AnomalyReportView(ctk.CTkFrame):
         self.lbl_tbl_count.pack(side="left")
 
         lbl_hint = ctk.CTkLabel(tbl_info,
-                                text="💡 Click đúp vào dòng để Sửa trong Drawer. Click 'Ảnh Lỗi' để Soi & Vẽ ảnh (Studio).",
+                                text="💡 Click vào 'Ảnh Lỗi' trên bảng để Soi & Đánh Dấu (Studio). Click đúp vào dòng để Sửa trong Drawer.",
                                 font=FONT_SMALL, text_color=TEXT_MUTED)
         lbl_hint.pack(side="right")
 
-        # Treeview with all 17 columns
+        # Treeview with 16 data columns + #0 Thumbnail Image column
         tree_container = tk.Frame(self.tbl_card, bg="#131929")
         tree_container.pack(fill="both", expand=True, padx=12, pady=(4, 12))
 
@@ -1473,23 +1578,25 @@ class AnomalyReportView(ctk.CTkFrame):
 
         cols = (
             "stt", "date", "process", "product", "machine", "tot", "def", "rate",
-            "resp", "pic", "img", "desc", "cause", "counter", "sop", "prog", "notes"
+            "resp", "pic", "desc", "cause", "counter", "sop", "prog", "notes"
         )
-        self.tree = ttk.Treeview(tree_container, columns=cols, show="headings",
+        self.tree = ttk.Treeview(tree_container, columns=cols, show="tree headings",
                                  style="Anomaly.Treeview", selectmode="browse")
 
+        self.tree.heading("#0", text="Ảnh Lỗi", anchor="center")
+        self.tree.column("#0", width=75, minwidth=65, anchor="center", stretch=False)
+
         headers_meta = [
-            ("stt", "STT", 50, "center"),
-            ("date", "Ngày Tháng", 105, "center"),
-            ("process", "Công Đoạn", 95, "center"),
+            ("stt", "STT", 45, "center"),
+            ("date", "Ngày Tháng", 100, "center"),
+            ("process", "Công Đoạn", 90, "center"),
             ("product", "Sản Phẩm (Model/PWB)", 160, "w"),
             ("machine", "Máy Móc / Line", 110, "center"),
             ("tot", "SL Kiểm", 85, "e"),
             ("def", "SL Lỗi", 80, "e"),
-            ("rate", "Tỷ Lệ (%)", 90, "e"),
-            ("resp", "Người Chịu TN", 140, "w"),
-            ("pic", "Người Phụ Trách", 130, "w"),
-            ("img", "Ảnh Lỗi", 115, "center"),
+            ("rate", "Tỷ Lệ (%)", 85, "e"),
+            ("resp", "Người Chịu TN", 135, "w"),
+            ("pic", "Người Phụ Trách", 125, "w"),
             ("desc", "Mô Tả Hiện Tượng Lỗi", 280, "w"),
             ("cause", "Nguyên Nhân", 250, "w"),
             ("counter", "Biện Pháp Cải Tiến", 280, "w"),
@@ -1500,7 +1607,7 @@ class AnomalyReportView(ctk.CTkFrame):
 
         for col_id, col_name, col_w, col_align in headers_meta:
             self.tree.heading(col_id, text=col_name)
-            self.tree.column(col_id, width=col_w, anchor=col_align, minwidth=50)
+            self.tree.column(col_id, width=col_w, anchor=col_align, minwidth=45)
 
         vsb = ttk.Scrollbar(tree_container, orient="vertical", command=self.tree.yview)
         hsb = ttk.Scrollbar(tree_container, orient="horizontal", command=self.tree.xview)
@@ -1585,7 +1692,6 @@ class AnomalyReportView(ctk.CTkFrame):
         for idx, r in enumerate(reports, 1):
             rate_val = r.get("defect_rate")
             rate_str = f"{rate_val:.2f}%" if rate_val is not None else "0.00%"
-            has_img = "🖼️ Xem / Vẽ" if r.get("image_url") else "—"
 
             tag = "even" if idx % 2 == 0 else "odd"
             prog = str(r.get("progress") or "")
@@ -1605,7 +1711,6 @@ class AnomalyReportView(ctk.CTkFrame):
                 rate_str,
                 r.get("responsible_person", ""),
                 r.get("pic", ""),
-                has_img,
                 r.get("description", ""),
                 r.get("root_cause", ""),
                 r.get("countermeasures", ""),
@@ -1613,7 +1718,9 @@ class AnomalyReportView(ctk.CTkFrame):
                 r.get("progress", "Đang thực hiện"),
                 r.get("notes", "")
             )
-            self.tree.insert("", "end", iid=str(r.get("id")), values=vals, tags=(tag,))
+            rep_id = str(r.get("id"))
+            thumb_photo = self._get_or_load_thumb(r.get("image_url"), rep_id)
+            self.tree.insert("", "end", iid=rep_id, text="", image=thumb_photo, values=vals, tags=(tag,))
 
     def _on_row_select(self, event):
         selected_ids = self.tree.selection()
@@ -1634,21 +1741,20 @@ class AnomalyReportView(ctk.CTkFrame):
         self._on_edit_report()
 
     def _on_tree_cell_click(self, event):
-        """Clicking directly on the 'Ảnh Lỗi' column cell opens the Image Studio, or prompts to add image in Drawer."""
+        """Clicking directly on the 'Ảnh Lỗi' column cell (#0) opens the Image Studio, or prompts to add image in Drawer."""
+        col_id = self.tree.identify_column(event.x)
+        row_id = self.tree.identify_row(event.y)
         region = self.tree.identify_region(event.x, event.y)
-        if region == "cell":
-            col_id = self.tree.identify_column(event.x)
-            row_id = self.tree.identify_row(event.y)
-            if row_id and col_id == "#11":  # Column 11: 'img' (Ảnh Lỗi)
-                self.tree.selection_set(row_id)
-                self._on_row_select(None)
-                found = [r for r in self.all_reports if str(r.get("id")) == str(row_id)]
-                if found:
-                    if found[0].get("image_url"):
-                        self.after(50, self._open_marking_studio)
-                    else:
-                        if messagebox.askyesno("Chưa có ảnh", "Báo cáo này chưa có hình ảnh đính kèm.\nBạn có muốn mở Drawer để thêm ảnh không?"):
-                            self._on_edit_report()
+        if row_id and (col_id == "#0" or region == "tree"):
+            self.tree.selection_set(row_id)
+            self._on_row_select(None)
+            found = [r for r in self.all_reports if str(r.get("id")) == str(row_id)]
+            if found:
+                if found[0].get("image_url"):
+                    self.after(50, self._open_marking_studio)
+                else:
+                    if messagebox.askyesno("Chưa có ảnh", "Báo cáo này chưa có hình ảnh đính kèm.\nBạn có muốn mở Drawer để thêm ảnh không?", parent=self):
+                        self._on_edit_report()
 
     def _update_action_buttons_state(self):
         has_sel = self.selected_report is not None
@@ -1729,6 +1835,15 @@ class AnomalyReportView(ctk.CTkFrame):
         self.drawer.open_for_edit(self.selected_report)
 
     def _on_drawer_saved(self, saved_rep):
+        if isinstance(saved_rep, dict) and saved_rep.get("image_url"):
+            url = saved_rep.get("image_url")
+            if hasattr(self.drawer, "current_pil_image") and self.drawer.current_pil_image:
+                try:
+                    thumb_im = self._create_thumbnail_image(self.drawer.current_pil_image, (46, 46))
+                    photo = ImageTk.PhotoImage(thumb_im)
+                    self._thumb_cache[url] = photo
+                except Exception:
+                    pass
         self.refresh_data()
         if hasattr(self.app, "show_toast"):
             self.app.show_toast("✅ Đã lưu báo cáo bất thường thành công!")
@@ -1801,7 +1916,7 @@ class AnomalyReportView(ctk.CTkFrame):
                         background=tree_bg,
                         fieldbackground=tree_bg,
                         foreground=tree_fg,
-                        rowheight=30,
+                        rowheight=56,
                         font=("Segoe UI", 10),
                         borderwidth=0)
         style.configure("Anomaly.Treeview.Heading",
@@ -1812,6 +1927,8 @@ class AnomalyReportView(ctk.CTkFrame):
         style.map("Anomaly.Treeview",
                   background=[("selected", sel_bg)],
                   foreground=[("selected", sel_fg)])
+
+        self._make_placeholder_images(is_dark=is_dark)
 
         self.tree.tag_configure("odd", background=odd_bg)
         self.tree.tag_configure("even", background=even_bg)
