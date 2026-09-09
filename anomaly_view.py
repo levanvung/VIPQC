@@ -1,18 +1,28 @@
 """
-VIPQC AI — Anomaly Report View Module
-Modern CustomTkinter GUI for viewing, creating, updating, deleting,
-filtering, and zooming defect images with Supabase Cloud backend.
+VIPQC AI — Anomaly Report View Module (Full-Width Table & Image Marking Studio)
+Modern CustomTkinter GUI featuring:
+1. Full-width 18-column Table without cramped sidebar
+2. Direct image viewing & interaction from rows
+3. Dedicated Image Marking & Zoom Studio:
+   - Pan, Zoom in/out, Mousewheel zoom, 100%, Fit
+   - Rotate 90 degrees
+   - Annotation Tools: Rectangle Box, Oval, Arrow, Freehand Pen, Text Notes
+   - Multi-color palette & stroke width
+   - Undo (Ctrl+Z) & Clear
+   - Save annotated image directly back to Supabase Cloud & Download to PC
+4. Action Bar & Context Menu: Add, Edit, Delete, Refresh, Export Excel, Admin lock
 """
 
 import os
 import io
+import math
 import threading
 from datetime import datetime
 import tkinter as tk
 import tkinter.ttk as ttk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, simpledialog
 import customtkinter as ctk
-from PIL import Image, ImageTk
+from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 import anomaly_service as svc
 
@@ -36,6 +46,15 @@ FONT_BOLD   = ("Segoe UI", 10, "bold")
 FONT_SMALL  = ("Segoe UI", 9)
 
 
+def safe_after(widget, ms: int, callback):
+    """Safely invokes callback on main thread if widget still exists."""
+    try:
+        if widget and widget.winfo_exists():
+            widget.after(ms, callback)
+    except Exception:
+        pass
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # DIALOG: PASSWORD AUTHENTICATION
 # ─────────────────────────────────────────────────────────────────────────────
@@ -51,7 +70,6 @@ class PasswordDialog(ctk.CTkToplevel):
 
         self.on_success = on_success
 
-        # Center dialog
         self.update_idletasks()
         try:
             x = parent.winfo_rootx() + (parent.winfo_width() // 2) - 200
@@ -166,128 +184,650 @@ class ChangePasswordDialog(ctk.CTkToplevel):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DIALOG: HIGH-RES IMAGE ZOOM VIEWER
+# ADVANCED IMAGE MARKING & ZOOM STUDIO (PHÓNG TO, XOAY, ZOOM, MARKING)
 # ─────────────────────────────────────────────────────────────────────────────
-class ImageZoomViewer(ctk.CTkToplevel):
-    def __init__(self, parent, image_url: str, title: str = "Chi Tiết Ảnh Lỗi"):
+class AnomalyImageStudioWindow(ctk.CTkToplevel):
+    """
+    Dedicated Studio for inspecting defect images with high-resolution pan/zoom,
+    90-degree rotations, and complete marking/annotation tools (boxes, ovals, arrows, freehand, text).
+    Allows saving the annotated image back to Supabase or downloading to local disk.
+    """
+    def __init__(self, parent, report_data: dict, on_image_updated=None):
         super().__init__(parent)
-        self.title(title)
-        self.geometry("980x720")
-        self.minsize(700, 500)
+        self.report_data = report_data
+        self.on_image_updated = on_image_updated
+        self.image_url = report_data.get("image_url", "")
+
+        prod = report_data.get("product_name", "Không rõ")
+        proc = report_data.get("process", "")
+        self.title(f"🖼️ Studio Soi & Đánh Dấu Ảnh Lỗi — {prod} ({proc})")
+        self.geometry("1300x840")
+        self.minsize(980, 640)
         self.configure(fg_color=BG_DEEP)
         self.transient(parent)
 
-        self.image_url = image_url
-        self.original_pil = None
+        # Image state
+        self.raw_image_bytes = None
+        self.original_pil: Image.Image = None
+        self.rotation_angle = 0  # 0, 90, 180, 270
         self.zoom_level = 1.0
-
-        # Top Bar
-        top_bar = ctk.CTkFrame(self, fg_color=BG_CARD, height=48, corner_radius=0)
-        top_bar.pack(fill="x")
-        top_bar.pack_propagate(False)
-
-        ctk.CTkLabel(top_bar, text=f"🔍 {title}", font=FONT_H2, text_color=TEXT_PRIMARY).pack(side="left", padx=16)
-
-        self.lbl_zoom = ctk.CTkLabel(top_bar, text="100%", font=FONT_BOLD, text_color=ACCENT_TEAL)
-        self.lbl_zoom.pack(side="right", padx=12)
-
-        ctk.CTkButton(top_bar, text="Zoom +", width=70, height=30, fg_color=BG_SURFACE, text_color=TEXT_PRIMARY,
-                      command=lambda: self._zoom(1.2)).pack(side="right", padx=4)
-        ctk.CTkButton(top_bar, text="Zoom -", width=70, height=30, fg_color=BG_SURFACE, text_color=TEXT_PRIMARY,
-                      command=lambda: self._zoom(0.8)).pack(side="right", padx=4)
-        ctk.CTkButton(top_bar, text="Vừa Khung (Fit)", width=110, height=30, fg_color=BG_SURFACE, text_color=TEXT_PRIMARY,
-                      command=self._fit_to_screen).pack(side="right", padx=4)
-
-        # Canvas for Pan & Zoom
-        self.canvas = tk.Canvas(self, bg="#0B0F1A", highlightthickness=0)
-        self.canvas.pack(fill="both", expand=True)
-
-        self.canvas.bind("<ButtonPress-1>", self._start_pan)
-        self.canvas.bind("<B1-Motion>", self._do_pan)
-        self.canvas.bind("<MouseWheel>", self._on_mousewheel)
-
-        self._pan_x = 0
-        self._pan_y = 0
+        self.pan_x = 0
+        self.pan_y = 0
         self._tk_img = None
 
+        # Annotation state
+        # Annotations are stored in (normalized or image-pixel) coordinates of the ROTATED image
+        self.annotations: list[dict] = []  # list of dicts: {"type", "coords" or "points", "color", "width", "text"}
+        self.current_tool = "pan"          # "pan", "rect", "oval", "arrow", "pen", "text"
+        self.current_color = "#EF4444"     # Red by default
+        self.current_width = 3
+        self.is_drawing = False
+        self.drag_start_screen = (0, 0)
+        self.current_temp_item = None
+        self.pen_current_points = []
+
+        self._build_ui()
         self._load_image_async()
 
+    def _build_ui(self):
+        # ── TOP TOOLBAR ──────────────────────────────────────────────────────
+        bar = ctk.CTkFrame(self, fg_color=BG_CARD, height=56, corner_radius=0,
+                           border_width=1, border_color=BORDER_CLR)
+        bar.pack(fill="x", side="top")
+        bar.pack_propagate(False)
+
+        inner = ctk.CTkFrame(bar, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=12, pady=8)
+
+        # Title & Info
+        ctk.CTkLabel(inner, text="🎨 STUDIO ĐÁNH DẤU ẢNH", font=FONT_H1, text_color=ACCENT_TEAL).pack(side="left", padx=(4, 12))
+
+        # Tool selector buttons
+        self.tool_buttons = {}
+        tools = [
+            ("pan", "✋ Di chuyển"),
+            ("rect", "🟥 Hộp"),
+            ("oval", "⭕ Tròn"),
+            ("arrow", "➡️ Mũi tên"),
+            ("pen", "✏️ Bút vẽ"),
+            ("text", "🔤 Chữ"),
+        ]
+
+        for t_key, t_label in tools:
+            btn = ctk.CTkButton(
+                inner, text=t_label, width=82, height=34, corner_radius=6,
+                font=FONT_SMALL,
+                fg_color=ACCENT_TEAL if t_key == self.current_tool else BG_SURFACE,
+                text_color=("#FFFFFF", "#0B0F1A") if t_key == self.current_tool else TEXT_PRIMARY,
+                hover_color=BG_HOVER,
+                command=lambda k=t_key: self._select_tool(k)
+            )
+            btn.pack(side="left", padx=2)
+            self.tool_buttons[t_key] = btn
+
+        # Separator
+        ctk.CTkFrame(inner, fg_color=BORDER_CLR, width=1, height=28).pack(side="left", padx=8)
+
+        # Color picker buttons
+        self.color_buttons = {}
+        colors = [
+            ("#EF4444", "Đỏ"),
+            ("#F59E0B", "Vàng"),
+            ("#10B981", "Xanh"),
+            ("#3B82F6", "Lam"),
+            ("#A855F7", "Tím"),
+            ("#FFFFFF", "Trắng"),
+        ]
+        for c_hex, c_name in colors:
+            btn = ctk.CTkButton(
+                inner, text="", width=24, height=24, corner_radius=12,
+                fg_color=c_hex, hover_color=c_hex,
+                border_width=2 if c_hex == self.current_color else 0,
+                border_color="#FFFFFF" if c_hex != "#FFFFFF" else "#0F172A",
+                command=lambda c=c_hex: self._select_color(c)
+            )
+            btn.pack(side="left", padx=2)
+            self.color_buttons[c_hex] = btn
+
+        # Stroke width selector
+        ctk.CTkFrame(inner, fg_color=BORDER_CLR, width=1, height=28).pack(side="left", padx=6)
+        self.width_buttons = {}
+        for w_val, w_label in [(2, "2px"), (4, "4px"), (6, "6px")]:
+            w_btn = ctk.CTkButton(
+                inner, text=w_label, width=38, height=30, corner_radius=6,
+                font=FONT_SMALL,
+                fg_color=ACCENT_TEAL if w_val == self.current_width else BG_SURFACE,
+                text_color=("#FFFFFF", "#0B0F1A") if w_val == self.current_width else TEXT_PRIMARY,
+                hover_color=BG_HOVER,
+                command=lambda w=w_val: self._select_width(w)
+            )
+            w_btn.pack(side="left", padx=1)
+            self.width_buttons[w_val] = w_btn
+
+        # Separator
+        ctk.CTkFrame(inner, fg_color=BORDER_CLR, width=1, height=28).pack(side="left", padx=8)
+
+        # Action: Undo
+        ctk.CTkButton(inner, text="↩️ Hoàn tác", width=85, height=34, font=FONT_SMALL,
+                      fg_color=BG_SURFACE, text_color=TEXT_PRIMARY, hover_color=BG_HOVER,
+                      command=self._undo).pack(side="left", padx=2)
+
+        # Action: Clear All Marks
+        ctk.CTkButton(inner, text="🗑️ Xóa nét", width=75, height=34, font=FONT_SMALL,
+                      fg_color=BG_SURFACE, text_color=ACCENT_RED, hover_color=BG_HOVER,
+                      command=self._clear_annotations).pack(side="left", padx=2)
+
+        # Separator
+        ctk.CTkFrame(inner, fg_color=BORDER_CLR, width=1, height=28).pack(side="left", padx=8)
+
+        # Rotate Button
+        ctk.CTkButton(inner, text="🔄 Xoay 90°", width=85, height=34, font=FONT_SMALL,
+                      fg_color=BG_SURFACE, text_color=TEXT_PRIMARY, hover_color=BG_HOVER,
+                      command=self._rotate_90).pack(side="left", padx=2)
+
+        # Zoom Buttons
+        ctk.CTkButton(inner, text="🔍+", width=36, height=34, font=FONT_BOLD,
+                      fg_color=BG_SURFACE, text_color=TEXT_PRIMARY, hover_color=BG_HOVER,
+                      command=lambda: self._zoom_by_factor(1.2)).pack(side="left", padx=2)
+        ctk.CTkButton(inner, text="🔍-", width=36, height=34, font=FONT_BOLD,
+                      fg_color=BG_SURFACE, text_color=TEXT_PRIMARY, hover_color=BG_HOVER,
+                      command=lambda: self._zoom_by_factor(0.8)).pack(side="left", padx=2)
+        ctk.CTkButton(inner, text="Vừa Khung", width=80, height=34, font=FONT_SMALL,
+                      fg_color=BG_SURFACE, text_color=TEXT_PRIMARY, hover_color=BG_HOVER,
+                      command=self._fit_to_screen).pack(side="left", padx=2)
+
+        self.lbl_zoom = ctk.CTkLabel(inner, text="100%", font=FONT_BOLD, text_color=ACCENT_TEAL, width=48)
+        self.lbl_zoom.pack(side="left", padx=4)
+
+        # Right-side Save buttons
+        self.btn_download = ctk.CTkButton(
+            inner, text="📥 Tải Về Máy", width=105, height=34, font=FONT_H2,
+            fg_color=BG_SURFACE, text_color=TEXT_PRIMARY, hover_color=BG_HOVER,
+            command=self._download_to_pc
+        )
+        self.btn_download.pack(side="right", padx=(4, 0))
+
+        self.btn_save_cloud = ctk.CTkButton(
+            inner, text="💾 Lưu Lên Báo Cáo", width=145, height=34, font=FONT_H2,
+            fg_color=ACCENT_TEAL, text_color=("#FFFFFF", "#0B0F1A"),
+            hover_color=("#0F766E", "#00A88C"),
+            command=self._save_to_cloud
+        )
+        self.btn_save_cloud.pack(side="right", padx=4)
+
+        # ── INTERACTIVE CANVAS WORKSPACE ──────────────────────────────────────
+        self.canvas_frame = ctk.CTkFrame(self, fg_color="black", corner_radius=0)
+        self.canvas_frame.pack(fill="both", expand=True)
+
+        self.canvas = tk.Canvas(self.canvas_frame, bg="#0B0F1A", highlightthickness=0, cursor="hand2")
+        self.canvas.pack(fill="both", expand=True)
+
+        # Mouse & Gesture bindings
+        self.canvas.bind("<ButtonPress-1>", self._on_canvas_press)
+        self.canvas.bind("<B1-Motion>", self._on_canvas_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
+
+        # Right click drag to pan anytime
+        self.canvas.bind("<ButtonPress-3>", self._start_right_pan)
+        self.canvas.bind("<B3-Motion>", self._do_right_pan)
+
+        # Wheel zoom
+        self.canvas.bind("<MouseWheel>", self._on_mousewheel)
+
+        # Hotkeys
+        self.bind("<Control-z>", lambda e: self._undo())
+        self.bind("<Control-Z>", lambda e: self._undo())
+        self.bind("<r>", lambda e: self._rotate_90())
+        self.bind("<R>", lambda e: self._rotate_90())
+
+    # ── IMAGE LOADING ────────────────────────────────────────────────────────
     def _load_image_async(self):
+        if not self.image_url:
+            messagebox.showwarning("Không có ảnh", "Báo cáo này chưa có hình ảnh đính kèm!")
+            return
+
         def _fetch():
             try:
                 import urllib.request
                 req = urllib.request.Request(self.image_url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=15, context=svc.get_ssl_context()) as resp:
-                    raw_data = resp.read()
-                pil_img = Image.open(io.BytesIO(raw_data))
+                ssl_ctx = svc.get_ssl_context()
+                with urllib.request.urlopen(req, timeout=20, context=ssl_ctx) as resp:
+                    raw = resp.read()
+                self.raw_image_bytes = raw
+                pil_img = Image.open(io.BytesIO(raw))
                 self.original_pil = pil_img
-                self.after(0, self._fit_to_screen)
+                safe_after(self, 0, self._fit_to_screen)
             except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Lỗi Tải Ảnh", f"Không thể tải ảnh từ Cloud:\n{e}"))
+                safe_after(self, 0, lambda: messagebox.showerror("Lỗi Tải Ảnh", f"Không thể tải ảnh từ Cloud:\n{e}"))
 
         threading.Thread(target=_fetch, daemon=True).start()
 
-    def _fit_to_screen(self):
+    def _get_current_base_pil(self) -> Image.Image:
+        """Returns the original PIL image rotated by current rotation angle."""
         if not self.original_pil:
+            return None
+        if self.rotation_angle == 90:
+            return self.original_pil.rotate(-90, expand=True)
+        elif self.rotation_angle == 180:
+            return self.original_pil.rotate(180, expand=True)
+        elif self.rotation_angle == 270:
+            return self.original_pil.rotate(-270, expand=True)
+        return self.original_pil
+
+    def _fit_to_screen(self):
+        base = self._get_current_base_pil()
+        if not base:
             return
-        cw = max(self.canvas.winfo_width(), 400)
-        ch = max(self.canvas.winfo_height(), 400)
-        iw, ih = self.original_pil.size
+        cw = max(self.canvas.winfo_width(), 600)
+        ch = max(self.canvas.winfo_height(), 500)
+        iw, ih = base.size
         scale = min((cw - 40) / iw, (ch - 40) / ih, 1.0)
-        self.zoom_level = scale
-        self._pan_x = (cw - int(iw * scale)) // 2
-        self._pan_y = (ch - int(ih * scale)) // 2
+        self.zoom_level = max(scale, 0.05)
+        self.pan_x = (cw - int(iw * self.zoom_level)) // 2
+        self.pan_y = (ch - int(ih * self.zoom_level)) // 2
         self._render()
 
-    def _zoom(self, factor):
-        if not self.original_pil:
+    def _zoom_by_factor(self, factor: float):
+        base = self._get_current_base_pil()
+        if not base:
             return
-        new_zoom = max(0.1, min(5.0, self.zoom_level * factor))
+        cw = max(self.canvas.winfo_width(), 600)
+        ch = max(self.canvas.winfo_height(), 500)
+
+        # Center zoom
+        center_x = cw / 2
+        center_y = ch / 2
+        img_cx = (center_x - self.pan_x) / self.zoom_level
+        img_cy = (center_y - self.pan_y) / self.zoom_level
+
+        new_zoom = max(0.05, min(8.0, self.zoom_level * factor))
         self.zoom_level = new_zoom
+        self.pan_x = center_x - img_cx * new_zoom
+        self.pan_y = center_y - img_cy * new_zoom
         self._render()
 
     def _on_mousewheel(self, event):
         factor = 1.15 if event.delta > 0 else 0.85
-        self._zoom(factor)
-
-    def _start_pan(self, event):
-        self._drag_start_x = event.x
-        self._drag_start_y = event.y
-
-    def _do_pan(self, event):
-        dx = event.x - self._drag_start_x
-        dy = event.y - self._drag_start_y
-        self._drag_start_x = event.x
-        self._drag_start_y = event.y
-        self._pan_x += dx
-        self._pan_y += dy
-        self.canvas.delete("img")
-        self.canvas.create_image(self._pan_x, self._pan_y, anchor="nw", image=self._tk_img, tags="img")
-
-    def _render(self):
-        if not self.original_pil:
+        base = self._get_current_base_pil()
+        if not base:
             return
-        iw, ih = self.original_pil.size
+        cursor_x = event.x
+        cursor_y = event.y
+        img_x = (cursor_x - self.pan_x) / self.zoom_level
+        img_y = (cursor_y - self.pan_y) / self.zoom_level
+
+        new_zoom = max(0.05, min(8.0, self.zoom_level * factor))
+        self.zoom_level = new_zoom
+        self.pan_x = cursor_x - img_x * new_zoom
+        self.pan_y = cursor_y - img_y * new_zoom
+        self._render()
+
+    def _rotate_90(self):
+        base = self._get_current_base_pil()
+        if not base:
+            return
+        old_w, old_h = base.size
+
+        # Transform all annotations for clockwise 90 rotation: (x, y) -> (old_h - y, x)
+        for ann in self.annotations:
+            t = ann.get("type")
+            if t in ("rect", "oval"):
+                x1, y1, x2, y2 = ann["coords"]
+                nx1, ny1 = old_h - y1, x1
+                nx2, ny2 = old_h - y2, x2
+                ann["coords"] = (min(nx1, nx2), min(ny1, ny2), max(nx1, nx2), max(ny1, ny2))
+            elif t == "arrow":
+                x1, y1, x2, y2 = ann["coords"]
+                ann["coords"] = (old_h - y1, x1, old_h - y2, x2)
+            elif t == "pen":
+                ann["points"] = [(old_h - y, x) for (x, y) in ann.get("points", [])]
+            elif t == "text":
+                x, y = ann["coords"]
+                ann["coords"] = (old_h - y, x)
+
+        self.rotation_angle = (self.rotation_angle + 90) % 360
+        self._fit_to_screen()
+
+    def _select_width(self, width: int):
+        self.current_width = width
+        for w, btn in self.width_buttons.items():
+            if w == width:
+                btn.configure(fg_color=ACCENT_TEAL, text_color=("#FFFFFF", "#0B0F1A"))
+            else:
+                btn.configure(fg_color=BG_SURFACE, text_color=TEXT_PRIMARY)
+
+    # ── TOOL & COLOR SELECTION ───────────────────────────────────────────────
+    def _select_tool(self, tool_key: str):
+        self.current_tool = tool_key
+        for k, btn in self.tool_buttons.items():
+            if k == tool_key:
+                btn.configure(fg_color=ACCENT_TEAL, text_color=("#FFFFFF", "#0B0F1A"))
+            else:
+                btn.configure(fg_color=BG_SURFACE, text_color=TEXT_PRIMARY)
+
+        # Change cursor accordingly
+        if tool_key == "pan":
+            self.canvas.configure(cursor="hand2")
+        elif tool_key == "text":
+            self.canvas.configure(cursor="xterm")
+        else:
+            self.canvas.configure(cursor="crosshair")
+
+    def _select_color(self, c_hex: str):
+        self.current_color = c_hex
+        for h, btn in self.color_buttons.items():
+            btn.configure(border_width=2 if h == c_hex else 0)
+
+    # ── ANNOTATION RENDERING ─────────────────────────────────────────────────
+    def _render(self):
+        base = self._get_current_base_pil()
+        if not base:
+            return
+
+        iw, ih = base.size
         nw = max(10, int(iw * self.zoom_level))
         nh = max(10, int(ih * self.zoom_level))
 
-        resized = self.original_pil.resize((nw, nh), Image.Resampling.BILINEAR)
+        resized = base.resize((nw, nh), Image.Resampling.BILINEAR)
         self._tk_img = ImageTk.PhotoImage(resized)
+
         self.canvas.delete("all")
-        self.canvas.create_image(self._pan_x, self._pan_y, anchor="nw", image=self._tk_img, tags="img")
+        # Draw background image
+        self.canvas.create_image(self.pan_x, self.pan_y, anchor="nw", image=self._tk_img, tags="bg_img")
+
+        # Draw all saved annotations
+        for ann in self.annotations:
+            self._draw_annotation_on_canvas(ann)
+
         self.lbl_zoom.configure(text=f"{int(self.zoom_level * 100)}%")
+
+    def _draw_annotation_on_canvas(self, ann: dict):
+        t = ann.get("type")
+        col = ann.get("color", "#EF4444")
+        w = max(1, int(ann.get("width", 3) * self.zoom_level))
+
+        if t in ("rect", "oval", "arrow"):
+            ix1, iy1, ix2, iy2 = ann["coords"]
+            sx1 = self.pan_x + ix1 * self.zoom_level
+            sy1 = self.pan_y + iy1 * self.zoom_level
+            sx2 = self.pan_x + ix2 * self.zoom_level
+            sy2 = self.pan_y + iy2 * self.zoom_level
+
+            if t == "rect":
+                self.canvas.create_rectangle(sx1, sy1, sx2, sy2, outline=col, width=w, tags="ann")
+            elif t == "oval":
+                self.canvas.create_oval(sx1, sy1, sx2, sy2, outline=col, width=w, tags="ann")
+            elif t == "arrow":
+                arrow_sz = max(10, int(14 * self.zoom_level))
+                self.canvas.create_line(sx1, sy1, sx2, sy2, fill=col, width=w, arrow=tk.LAST,
+                                        arrowshape=(arrow_sz, arrow_sz + 4, max(4, arrow_sz // 2)), tags="ann")
+
+        elif t == "pen":
+            screen_pts = []
+            for (ix, iy) in ann.get("points", []):
+                screen_pts.extend([self.pan_x + ix * self.zoom_level, self.pan_y + iy * self.zoom_level])
+            if len(screen_pts) >= 4:
+                self.canvas.create_line(*screen_pts, fill=col, width=w, smooth=True, tags="ann")
+
+        elif t == "text":
+            ix, iy = ann["coords"]
+            sx = self.pan_x + ix * self.zoom_level
+            sy = self.pan_y + iy * self.zoom_level
+            txt = ann.get("text", "")
+            f_sz = max(10, int(13 * self.zoom_level))
+            # Text background badge for clarity
+            self.canvas.create_rectangle(sx - 2, sy - 2, sx + len(txt) * (f_sz * 0.65) + 6, sy + f_sz + 6,
+                                         fill="#000000", outline=col, width=1, tags="ann")
+            self.canvas.create_text(sx + 2, sy + 2, text=txt, fill=col, font=("Segoe UI", f_sz, "bold"),
+                                    anchor="nw", tags="ann")
+
+    # ── MOUSE DRAWING INTERACTIONS ───────────────────────────────────────────
+    def _on_canvas_press(self, event):
+        base = self._get_current_base_pil()
+        if not base:
+            return
+
+        if self.current_tool == "pan":
+            self._pan_start_x = event.x
+            self._pan_start_y = event.y
+            return
+
+        # Convert screen to image coords
+        ix = (event.x - self.pan_x) / self.zoom_level
+        iy = (event.y - self.pan_y) / self.zoom_level
+        self.drag_start_screen = (event.x, event.y)
+        self.drag_start_img = (ix, iy)
+        self.is_drawing = True
+
+        if self.current_tool == "pen":
+            self.pen_current_points = [(ix, iy)]
+        elif self.current_tool == "text":
+            self.is_drawing = False
+            txt = simpledialog.askstring("Ghi Chú Trên Ảnh", "Nhập nội dung ghi chú:", parent=self)
+            if txt and txt.strip():
+                self.annotations.append({
+                    "type": "text",
+                    "coords": (ix, iy),
+                    "text": txt.strip(),
+                    "color": self.current_color,
+                    "width": self.current_width
+                })
+                self._render()
+
+    def _on_canvas_drag(self, event):
+        if self.current_tool == "pan":
+            dx = event.x - self._pan_start_x
+            dy = event.y - self._pan_start_y
+            self._pan_start_x = event.x
+            self._pan_start_y = event.y
+            self.pan_x += dx
+            self.pan_y += dy
+            self._render()
+            return
+
+        if not self.is_drawing:
+            return
+
+        # Live preview of current shape
+        self.canvas.delete("temp_shape")
+        sx1, sy1 = self.drag_start_screen
+        sx2, sy2 = event.x, event.y
+        col = self.current_color
+        w = self.current_width
+
+        if self.current_tool == "rect":
+            self.canvas.create_rectangle(sx1, sy1, sx2, sy2, outline=col, width=w, tags="temp_shape")
+        elif self.current_tool == "oval":
+            self.canvas.create_oval(sx1, sy1, sx2, sy2, outline=col, width=w, tags="temp_shape")
+        elif self.current_tool == "arrow":
+            self.canvas.create_line(sx1, sy1, sx2, sy2, fill=col, width=w, arrow=tk.LAST, tags="temp_shape")
+        elif self.current_tool == "pen":
+            ix = (event.x - self.pan_x) / self.zoom_level
+            iy = (event.y - self.pan_y) / self.zoom_level
+            self.pen_current_points.append((ix, iy))
+            screen_pts = []
+            for (px, py) in self.pen_current_points:
+                screen_pts.extend([self.pan_x + px * self.zoom_level, self.pan_y + py * self.zoom_level])
+            if len(screen_pts) >= 4:
+                self.canvas.create_line(*screen_pts, fill=col, width=w, tags="temp_shape")
+
+    def _on_canvas_release(self, event):
+        if not self.is_drawing:
+            return
+        self.is_drawing = False
+        self.canvas.delete("temp_shape")
+
+        ix1, iy1 = self.drag_start_img
+        ix2 = (event.x - self.pan_x) / self.zoom_level
+        iy2 = (event.y - self.pan_y) / self.zoom_level
+
+        # Ignore tiny accidental clicks
+        dist = math.hypot(event.x - self.drag_start_screen[0], event.y - self.drag_start_screen[1])
+        if dist < 6 and self.current_tool != "pen":
+            return
+
+        if self.current_tool in ("rect", "oval", "arrow"):
+            self.annotations.append({
+                "type": self.current_tool,
+                "coords": (ix1, iy1, ix2, iy2),
+                "color": self.current_color,
+                "width": self.current_width
+            })
+        elif self.current_tool == "pen" and len(self.pen_current_points) > 1:
+            self.annotations.append({
+                "type": "pen",
+                "points": list(self.pen_current_points),
+                "color": self.current_color,
+                "width": self.current_width
+            })
+            self.pen_current_points = []
+
+        self._render()
+
+    def _start_right_pan(self, event):
+        self._r_pan_start_x = event.x
+        self._r_pan_start_y = event.y
+
+    def _do_right_pan(self, event):
+        dx = event.x - self._r_pan_start_x
+        dy = event.y - self._r_pan_start_y
+        self._r_pan_start_x = event.x
+        self._r_pan_start_y = event.y
+        self.pan_x += dx
+        self.pan_y += dy
+        self._render()
+
+    def _undo(self):
+        if self.annotations:
+            self.annotations.pop()
+            self._render()
+
+    def _clear_annotations(self):
+        if not self.annotations:
+            return
+        if messagebox.askyesno("Xóa nét vẽ", "Bạn có chắc chắn muốn xóa toàn bộ các nét đánh dấu trên ảnh?"):
+            self.annotations.clear()
+            self._render()
+
+    # ── EXPORTING / BURNING ANNOTATIONS ON PIL ────────────────────────────────
+    def _render_flattened_pil(self) -> Image.Image:
+        """Draws all annotations onto the full-resolution rotated PIL image."""
+        base = self._get_current_base_pil()
+        if not base:
+            return None
+        out = base.copy().convert("RGB")
+        draw = ImageDraw.Draw(out)
+
+        for ann in self.annotations:
+            t = ann.get("type")
+            col = ann.get("color", "#EF4444")
+            w = max(2, int(ann.get("width", 3)))
+
+            if t == "rect":
+                x1, y1, x2, y2 = ann["coords"]
+                draw.rectangle((min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)), outline=col, width=w)
+            elif t == "oval":
+                x1, y1, x2, y2 = ann["coords"]
+                draw.ellipse((min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)), outline=col, width=w)
+            elif t == "arrow":
+                x1, y1, x2, y2 = ann["coords"]
+                draw.line([(x1, y1), (x2, y2)], fill=col, width=w)
+                dx = x2 - x1
+                dy = y2 - y1
+                length = math.hypot(dx, dy)
+                if length > 0:
+                    ux, uy = dx / length, dy / length
+                    head_len = min(32, max(14, w * 5))
+                    px, py = -uy, ux
+                    p1 = (x2 - ux * head_len + px * (head_len * 0.5), y2 - uy * head_len + py * (head_len * 0.5))
+                    p2 = (x2 - ux * head_len - px * (head_len * 0.5), y2 - uy * head_len - py * (head_len * 0.5))
+                    draw.polygon([(x2, y2), p1, p2], fill=col)
+            elif t == "pen":
+                pts = ann.get("points", [])
+                if len(pts) > 1:
+                    draw.line(pts, fill=col, width=w, joint="curve")
+            elif t == "text":
+                x, y = ann["coords"]
+                txt = ann.get("text", "")
+                try:
+                    fnt = ImageFont.load_default()
+                except Exception:
+                    fnt = None
+                # Black badge background
+                bb = (x - 2, y - 2, x + len(txt) * 8 + 6, y + 18)
+                draw.rectangle(bb, fill="#000000", outline=col, width=1)
+                draw.text((x + 2, y + 2), txt, fill=col, font=fnt)
+
+        return out
+
+    def _download_to_pc(self):
+        flat = self._render_flattened_pil()
+        if not flat:
+            return
+
+        prod = self.report_data.get("product_name", "defect")
+        proc = self.report_data.get("process", "QC")
+        def_fname = f"Marking_{prod}_{proc}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+        f = filedialog.asksaveasfilename(
+            title="Lưu Ảnh Đã Đánh Dấu",
+            initialfile=def_fname,
+            defaultextension=".jpg",
+            filetypes=[("JPEG Image", "*.jpg"), ("PNG Image", "*.png")]
+        )
+        if f:
+            try:
+                flat.save(f, quality=92)
+                messagebox.showinfo("Thành công", f"Đã lưu ảnh đánh dấu về máy:\n{f}")
+            except Exception as e:
+                messagebox.showerror("Lỗi", f"Không thể lưu file ảnh:\n{e}")
+
+    def _save_to_cloud(self):
+        flat = self._render_flattened_pil()
+        if not flat:
+            return
+
+        if not messagebox.askyesno("Lưu Lên Cloud", "Bạn có muốn lưu đè ảnh đã đánh dấu này lên Báo Cáo trên Supabase Cloud?"):
+            return
+
+        self.btn_save_cloud.configure(state="disabled", text="⏳ Đang lưu...")
+
+        def _do_upload():
+            try:
+                buf = io.BytesIO()
+                flat.save(buf, format="JPEG", quality=88, optimize=True)
+                new_bytes = buf.getvalue()
+
+                rep_id = self.report_data["id"]
+                # Update report with new image bytes
+                updated = svc.update_report(rep_id, self.report_data, new_image_bytes=new_bytes, new_image_name="annotated_defect.jpg")
+                safe_after(self, 0, lambda: self._on_cloud_saved_success(updated))
+            except Exception as e:
+                safe_after(self, 0, lambda: self._on_cloud_saved_error(str(e)))
+
+        threading.Thread(target=_do_upload, daemon=True).start()
+
+    def _on_cloud_saved_success(self, updated_rep):
+        self.btn_save_cloud.configure(state="normal", text="💾 Lưu Lên Báo Cáo")
+        messagebox.showinfo("Thành công", "✅ Đã cập nhật ảnh đánh dấu lên Cloud Supabase thành công!")
+        if self.on_image_updated:
+            self.on_image_updated(updated_rep)
+        self.destroy()
+
+    def _on_cloud_saved_error(self, err_msg):
+        self.btn_save_cloud.configure(state="normal", text="💾 Lưu Lên Báo Cáo")
+        messagebox.showerror("Lỗi Lưu Cloud", f"Không thể lưu ảnh lên Cloud:\n{err_msg}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DIALOG: CREATE / EDIT ANOMALY REPORT (18 COLUMNS)
 # ─────────────────────────────────────────────────────────────────────────────
 class AnomalyEditDialog(ctk.CTkToplevel):
-    def __init__(self, parent, report_data: dict = None, on_saved = None):
+    def __init__(self, parent, report_data: dict = None, on_saved=None):
         super().__init__(parent)
         self.is_edit = report_data is not None
         self.title("Chỉnh Sửa Báo Cáo Bất Thường" if self.is_edit else "Tạo Báo Cáo Bất Thường Mới")
-        self.geometry("900x720")
-        self.minsize(780, 600)
+        self.geometry("920x740")
+        self.minsize(800, 620)
         self.configure(fg_color=BG_DEEP)
         self.transient(parent)
         self.grab_set()
@@ -301,7 +841,6 @@ class AnomalyEditDialog(ctk.CTkToplevel):
         self._build_ui()
 
     def _build_ui(self):
-        # Header
         header = ctk.CTkFrame(self, fg_color=BG_CARD, height=54, corner_radius=0)
         header.pack(fill="x")
         header.pack_propagate(False)
@@ -309,11 +848,9 @@ class AnomalyEditDialog(ctk.CTkToplevel):
         title_text = "✏️ Chỉnh Sửa Báo Cáo Bất Thường" if self.is_edit else "➕ Tạo Báo Cáo Bất Thường Mới"
         ctk.CTkLabel(header, text=title_text, font=FONT_H1, text_color=TEXT_PRIMARY).pack(side="left", padx=20)
 
-        # Scrollable form body
         scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
         scroll.pack(fill="both", expand=True, padx=20, pady=12)
 
-        # 2-Column Grid
         col_left = ctk.CTkFrame(scroll, fg_color=BG_CARD, corner_radius=10, border_width=1, border_color=BORDER_CLR)
         col_left.pack(side="left", fill="both", expand=True, padx=(0, 8), pady=4)
 
@@ -322,16 +859,14 @@ class AnomalyEditDialog(ctk.CTkToplevel):
 
         pad = {"padx": 16, "pady": (4, 4)}
 
-        # ── LEFT COLUMN (Basic Metrics & Specs) ──
+        # ── LEFT COLUMN ──
         ctk.CTkLabel(col_left, text="📌 Thông Tin Chung & Số Lượng", font=FONT_H2, text_color=ACCENT_TEAL).pack(anchor="w", padx=16, pady=(12, 6))
 
-        # Date
         ctk.CTkLabel(col_left, text="Ngày Tháng (YYYY-MM-DD):", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
         self.ent_date = ctk.CTkEntry(col_left, height=34, font=FONT_BODY)
         self.ent_date.pack(fill="x", **pad)
         self.ent_date.insert(0, str(self.report_data.get("report_date") or datetime.now().strftime("%Y-%m-%d")))
 
-        # Process
         ctk.CTkLabel(col_left, text="Công Đoạn:", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
         self.opt_process = ctk.CTkComboBox(col_left, values=["CHA", "SCP", "RAD", "CHP", "SMT", "Lắp Ráp", "KCS / Final QC", "Khác"],
                                           height=34, font=FONT_BODY)
@@ -339,23 +874,20 @@ class AnomalyEditDialog(ctk.CTkToplevel):
         if self.report_data.get("process"):
             self.opt_process.set(self.report_data.get("process"))
 
-        # Product
         ctk.CTkLabel(col_left, text="Sản Phẩm (Model / PWB):", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
         self.ent_product = ctk.CTkEntry(col_left, height=34, font=FONT_BODY)
         self.ent_product.pack(fill="x", **pad)
         self.ent_product.insert(0, str(self.report_data.get("product_name") or ""))
 
-        # Machine
         ctk.CTkLabel(col_left, text="Máy Móc / Chuyền / Thiết Bị:", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
         self.ent_machine = ctk.CTkEntry(col_left, height=34, font=FONT_BODY)
         self.ent_machine.pack(fill="x", **pad)
         self.ent_machine.insert(0, str(self.report_data.get("machine") or ""))
 
-        # Quantities & Defect Rate row
+        # Quantities
         q_frame = ctk.CTkFrame(col_left, fg_color="transparent")
         q_frame.pack(fill="x", padx=16, pady=4)
 
-        # Total Qty
         f_tot = ctk.CTkFrame(q_frame, fg_color="transparent")
         f_tot.pack(side="left", fill="x", expand=True, padx=(0, 4))
         ctk.CTkLabel(f_tot, text="Số Lượng KT:", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w")
@@ -364,7 +896,6 @@ class AnomalyEditDialog(ctk.CTkToplevel):
         self.ent_total_qty.insert(0, str(self.report_data.get("total_qty", 0)))
         self.ent_total_qty.bind("<KeyRelease>", self._calc_rate)
 
-        # Defect Qty
         f_def = ctk.CTkFrame(q_frame, fg_color="transparent")
         f_def.pack(side="left", fill="x", expand=True, padx=4)
         ctk.CTkLabel(f_def, text="Số Lượng Lỗi:", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w")
@@ -373,7 +904,6 @@ class AnomalyEditDialog(ctk.CTkToplevel):
         self.ent_defect_qty.insert(0, str(self.report_data.get("defect_qty", 0)))
         self.ent_defect_qty.bind("<KeyRelease>", self._calc_rate)
 
-        # Defect Rate (%)
         f_rate = ctk.CTkFrame(q_frame, fg_color="transparent")
         f_rate.pack(side="left", fill="x", expand=True, padx=(4, 0))
         ctk.CTkLabel(f_rate, text="Tỷ Lệ Lỗi (%):", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w")
@@ -381,7 +911,6 @@ class AnomalyEditDialog(ctk.CTkToplevel):
                                          fg_color=BG_SURFACE, corner_radius=6, text_color=ACCENT_AMBER)
         self.lbl_rate_val.pack(fill="x")
 
-        # Responsible & PIC
         ctk.CTkLabel(col_left, text="Người Chịu Trách Nhiệm (Manager/Leader):", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
         self.ent_resp = ctk.CTkEntry(col_left, height=34, font=FONT_BODY)
         self.ent_resp.pack(fill="x", **pad)
@@ -392,7 +921,6 @@ class AnomalyEditDialog(ctk.CTkToplevel):
         self.ent_pic.pack(fill="x", **pad)
         self.ent_pic.insert(0, str(self.report_data.get("pic") or ""))
 
-        # Progress
         ctk.CTkLabel(col_left, text="Tiến Độ:", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
         self.opt_progress = ctk.CTkOptionMenu(col_left, values=["Chưa thực hiện", "Đang thực hiện", "Đã hoàn thành"],
                                              height=34, font=FONT_BODY)
@@ -402,28 +930,24 @@ class AnomalyEditDialog(ctk.CTkToplevel):
         else:
             self.opt_progress.set("Đang thực hiện")
 
-        # ── RIGHT COLUMN (Descriptions & Image) ──
+        # ── RIGHT COLUMN ──
         ctk.CTkLabel(col_right, text="📝 Phân Tích & Biện Pháp Khắc Phục", font=FONT_H2, text_color=ACCENT_TEAL).pack(anchor="w", padx=16, pady=(12, 6))
 
-        # Description
         ctk.CTkLabel(col_right, text="Mô Tả Lỗi (Hiện tượng bất thường):", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
         self.txt_desc = ctk.CTkTextbox(col_right, height=65, font=FONT_BODY)
         self.txt_desc.pack(fill="x", **pad)
         self.txt_desc.insert("1.0", str(self.report_data.get("description") or ""))
 
-        # Root Cause
         ctk.CTkLabel(col_right, text="Nguyên Nhân:", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
         self.txt_cause = ctk.CTkTextbox(col_right, height=65, font=FONT_BODY)
         self.txt_cause.pack(fill="x", **pad)
         self.txt_cause.insert("1.0", str(self.report_data.get("root_cause") or ""))
 
-        # Countermeasures
         ctk.CTkLabel(col_right, text="Các Biện Pháp Cải Tiến:", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
         self.txt_counter = ctk.CTkTextbox(col_right, height=65, font=FONT_BODY)
         self.txt_counter.pack(fill="x", **pad)
         self.txt_counter.insert("1.0", str(self.report_data.get("countermeasures") or ""))
 
-        # SOP & Notes
         ctk.CTkLabel(col_right, text="Tiêu Chuẩn Hóa SOP:", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
         self.ent_sop = ctk.CTkEntry(col_right, height=34, font=FONT_BODY)
         self.ent_sop.pack(fill="x", **pad)
@@ -435,7 +959,7 @@ class AnomalyEditDialog(ctk.CTkToplevel):
         self.ent_notes.insert(0, str(self.report_data.get("notes") or ""))
 
         # Image section
-        ctk.CTkLabel(col_right, text="🖼️ Hình Ảnh Lỗi (Click để chọn hoặc bấm Ctrl+V để dán):",
+        ctk.CTkLabel(col_right, text="🖼️ Hình Ảnh Lỗi (Chọn file hoặc chụp màn hình rồi Ctrl+V):",
                      font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", padx=16, pady=(6, 2))
 
         img_box = ctk.CTkFrame(col_right, fg_color=BG_SURFACE, corner_radius=8, height=110)
@@ -458,11 +982,9 @@ class AnomalyEditDialog(ctk.CTkToplevel):
                                            command=self._clear_image)
         self.btn_clear_img.pack(pady=3)
 
-        # Global clipboard bind
         self.bind("<Control-v>", lambda e: self._paste_image())
         self.bind("<Control-V>", lambda e: self._paste_image())
 
-        # Load existing image if edit
         if self.report_data.get("image_url"):
             self._load_remote_thumb(self.report_data.get("image_url"))
 
@@ -528,7 +1050,6 @@ class AnomalyEditDialog(ctk.CTkToplevel):
                 self.selected_image_name = "pasted_defect.jpg"
                 self._show_thumb_from_bytes(self.selected_image_bytes)
             elif isinstance(clip_img, list) and clip_img:
-                # File path in clipboard
                 p = clip_img[0]
                 if os.path.isfile(p):
                     with open(p, "rb") as fp:
@@ -536,7 +1057,7 @@ class AnomalyEditDialog(ctk.CTkToplevel):
                     self.selected_image_name = os.path.basename(p)
                     self._show_thumb_from_bytes(self.selected_image_bytes)
             else:
-                messagebox.showinfo("Clipboard", "Không tìm thấy ảnh trong Clipboard (Hãy chụp ảnh màn hình bằng PrintScreen/Snipping Tool rồi thử lại).")
+                messagebox.showinfo("Clipboard", "Không tìm thấy ảnh trong Clipboard (Hãy chụp ảnh màn hình bằng Snipping Tool rồi thử lại).")
         except Exception as e:
             messagebox.showwarning("Lỗi Clipboard", f"Không thể dán ảnh:\n{e}")
 
@@ -546,7 +1067,7 @@ class AnomalyEditDialog(ctk.CTkToplevel):
             im.thumbnail((140, 95))
             self._thumb_tk = ImageTk.PhotoImage(im)
             self.lbl_img_preview.configure(image=self._thumb_tk, text="")
-        except Exception as e:
+        except Exception:
             self.lbl_img_preview.configure(text="[Ảnh đã chọn]")
 
     def _load_remote_thumb(self, url: str):
@@ -554,7 +1075,8 @@ class AnomalyEditDialog(ctk.CTkToplevel):
             try:
                 import urllib.request
                 req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=10, context=svc.get_ssl_context()) as r:
+                ssl_ctx = svc.get_ssl_context()
+                with urllib.request.urlopen(req, timeout=10, context=ssl_ctx) as r:
                     raw = r.read()
                 im = Image.open(io.BytesIO(raw))
                 im.thumbnail((140, 95))
@@ -572,7 +1094,6 @@ class AnomalyEditDialog(ctk.CTkToplevel):
         self.lbl_img_preview.configure(image="", text="[Đã xóa ảnh]")
 
     def _save(self):
-        # Basic validation
         prod = self.ent_product.get().strip()
         if not prod:
             messagebox.showwarning("Thiếu thông tin", "Vui lòng nhập Tên Sản Phẩm!")
@@ -624,9 +1145,9 @@ class AnomalyEditDialog(ctk.CTkToplevel):
                         image_bytes=self.selected_image_bytes,
                         original_image_name=self.selected_image_name
                     )
-                self.after(0, lambda: self._on_save_success(res))
+                safe_after(self, 0, lambda: self._on_save_success(res))
             except Exception as e:
-                self.after(0, lambda: self._on_save_error(str(e)))
+                safe_after(self, 0, lambda: self._on_save_error(str(e)))
 
         threading.Thread(target=_do_save, daemon=True).start()
 
@@ -642,7 +1163,7 @@ class AnomalyEditDialog(ctk.CTkToplevel):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MAIN VIEW: ANOMALY REPORT VIEW (CTK FRAME)
+# MAIN VIEW: ANOMALY REPORT VIEW (FULL-WIDTH TREEVIEW TABLE)
 # ─────────────────────────────────────────────────────────────────────────────
 class AnomalyReportView(ctk.CTkFrame):
     def __init__(self, parent, app):
@@ -653,7 +1174,6 @@ class AnomalyReportView(ctk.CTkFrame):
         self.filtered_reports: list[dict] = []
         self.selected_report: dict = None
         self.is_admin_session = False
-        self._current_thumb_tk = None
 
         self._build_ui()
         self.refresh_data()
@@ -666,16 +1186,16 @@ class AnomalyReportView(ctk.CTkFrame):
         top_bar.pack_propagate(False)
 
         # Search box
-        self.ent_search = ctk.CTkEntry(top_bar, placeholder_text="🔍 Tìm kiếm sản phẩm, công đoạn, người phụ trách, lỗi...",
-                                       width=300, height=36, corner_radius=8, font=FONT_BODY)
-        self.ent_search.pack(side="left", padx=(16, 8), pady=14)
+        self.ent_search = ctk.CTkEntry(top_bar, placeholder_text="🔍 Tìm kiếm sản phẩm, công đoạn, lỗi, người phụ trách...",
+                                       width=280, height=36, corner_radius=8, font=FONT_BODY)
+        self.ent_search.pack(side="left", padx=(14, 6), pady=14)
         self.ent_search.bind("<KeyRelease>", lambda e: self._apply_filter())
 
         # Process Filter
         self.opt_filter_proc = ctk.CTkOptionMenu(
             top_bar,
             values=["Tất cả công đoạn", "CHA", "SCP", "RAD", "CHP", "SMT", "Lắp Ráp", "KCS / Final QC"],
-            height=36, corner_radius=8, font=FONT_SMALL,
+            height=36, corner_radius=8, font=FONT_SMALL, width=130,
             command=lambda v: self._apply_filter()
         )
         self.opt_filter_proc.pack(side="left", padx=4)
@@ -684,7 +1204,7 @@ class AnomalyReportView(ctk.CTkFrame):
         self.opt_filter_prog = ctk.CTkOptionMenu(
             top_bar,
             values=["Tất cả tiến độ", "Chưa thực hiện", "Đang thực hiện", "Đã hoàn thành"],
-            height=36, corner_radius=8, font=FONT_SMALL,
+            height=36, corner_radius=8, font=FONT_SMALL, width=130,
             command=lambda v: self._apply_filter()
         )
         self.opt_filter_prog.pack(side="left", padx=4)
@@ -695,7 +1215,7 @@ class AnomalyReportView(ctk.CTkFrame):
             fg_color=BG_SURFACE, text_color=TEXT_PRIMARY, hover_color=BG_HOVER,
             font=FONT_SMALL, command=self._toggle_admin_lock
         )
-        self.btn_admin_lock.pack(side="right", padx=(4, 16))
+        self.btn_admin_lock.pack(side="right", padx=(4, 14))
 
         self.btn_export = ctk.CTkButton(
             top_bar, text="📊 Xuất Excel", width=105, height=36, corner_radius=8,
@@ -711,6 +1231,31 @@ class AnomalyReportView(ctk.CTkFrame):
         )
         self.btn_refresh.pack(side="right", padx=4)
 
+        # Action: Delete selected
+        self.btn_delete = ctk.CTkButton(
+            top_bar, text="🗑️ Xóa", width=80, height=36, corner_radius=8,
+            fg_color=BG_SURFACE, text_color=ACCENT_RED, hover_color=BG_HOVER,
+            font=FONT_SMALL, command=self._on_delete_report, state="disabled"
+        )
+        self.btn_delete.pack(side="right", padx=4)
+
+        # Action: Edit selected
+        self.btn_edit = ctk.CTkButton(
+            top_bar, text="✏️ Sửa", width=80, height=36, corner_radius=8,
+            fg_color=BG_SURFACE, text_color=TEXT_PRIMARY, hover_color=BG_HOVER,
+            font=FONT_SMALL, command=self._on_edit_report, state="disabled"
+        )
+        self.btn_edit.pack(side="right", padx=4)
+
+        # Action: Open Image Marking Studio
+        self.btn_open_marking = ctk.CTkButton(
+            top_bar, text="🖼️ Soi & Vẽ Ảnh", width=120, height=36, corner_radius=8,
+            fg_color=BG_SURFACE, text_color=ACCENT_BLUE, hover_color=BG_HOVER,
+            font=FONT_SMALL, command=self._open_marking_studio, state="disabled"
+        )
+        self.btn_open_marking.pack(side="right", padx=4)
+
+        # Action: Add Report
         self.btn_add = ctk.CTkButton(
             top_bar, text="➕ Thêm Báo Cáo", width=135, height=36, corner_radius=8,
             fg_color=ACCENT_TEAL, text_color=("#FFFFFF", "#0B0F1A"),
@@ -718,54 +1263,58 @@ class AnomalyReportView(ctk.CTkFrame):
         )
         self.btn_add.pack(side="right", padx=4)
 
-        # ── WORKSPACE SPLIT (Left: Table | Right: Detail Inspection) ─────────
-        workspace = ctk.CTkFrame(self, fg_color="transparent")
-        workspace.pack(fill="both", expand=True)
+        # ── FULL-WIDTH TABLE CONTAINER (NO SIDEBAR) ──────────────────────────
+        tbl_card = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=12,
+                                border_width=1, border_color=BORDER_CLR)
+        tbl_card.pack(fill="both", expand=True)
 
-        # Left Panel (Table)
-        p_left = ctk.CTkFrame(workspace, fg_color=BG_CARD, corner_radius=12,
-                              border_width=1, border_color=BORDER_CLR)
-        p_left.pack(side="left", fill="both", expand=True, padx=(0, 10))
-
-        # Status row above tree
-        tbl_info = ctk.CTkFrame(p_left, fg_color="transparent", height=32)
-        tbl_info.pack(fill="x", padx=14, pady=(10, 4))
+        # Table Header Info Bar
+        tbl_info = ctk.CTkFrame(tbl_card, fg_color="transparent", height=34)
+        tbl_info.pack(fill="x", padx=16, pady=(10, 4))
 
         self.lbl_tbl_count = ctk.CTkLabel(tbl_info, text="Danh Sách Báo Cáo: 0 bản ghi",
                                           font=FONT_H2, text_color=TEXT_PRIMARY)
         self.lbl_tbl_count.pack(side="left")
 
-        # Treeview
-        tree_container = tk.Frame(p_left, bg="#131929")
-        tree_container.pack(fill="both", expand=True, padx=10, pady=(4, 10))
+        lbl_hint = ctk.CTkLabel(tbl_info,
+                                text="💡 Click chọn dòng để Sửa/Xóa. Click đúp vào dòng để Soi ảnh & Đánh dấu (Marking).",
+                                font=FONT_SMALL, text_color=TEXT_MUTED)
+        lbl_hint.pack(side="right")
 
-        cols = ("stt", "date", "process", "product", "machine", "tot", "def", "rate", "pic", "prog", "img")
+        # Treeview with all 17 columns
+        tree_container = tk.Frame(tbl_card, bg="#131929")
+        tree_container.pack(fill="both", expand=True, padx=12, pady=(4, 12))
+
+        cols = (
+            "stt", "date", "process", "product", "machine", "tot", "def", "rate",
+            "resp", "pic", "img", "desc", "cause", "counter", "sop", "prog", "notes"
+        )
         self.tree = ttk.Treeview(tree_container, columns=cols, show="headings",
                                  style="Anomaly.Treeview", selectmode="browse")
 
-        self.tree.heading("stt", text="STT")
-        self.tree.heading("date", text="Ngày")
-        self.tree.heading("process", text="Công Đoạn")
-        self.tree.heading("product", text="Sản Phẩm")
-        self.tree.heading("machine", text="Máy Móc")
-        self.tree.heading("tot", text="SL Kiểm")
-        self.tree.heading("def", text="SL Lỗi")
-        self.tree.heading("rate", text="Tỷ Lệ (%)")
-        self.tree.heading("pic", text="Phụ Trách")
-        self.tree.heading("prog", text="Tiến Độ")
-        self.tree.heading("img", text="Ảnh")
+        headers_meta = [
+            ("stt", "STT", 46, "center"),
+            ("date", "Ngày Tháng", 95, "center"),
+            ("process", "Công Đoạn", 90, "center"),
+            ("product", "Sản Phẩm", 140, "w"),
+            ("machine", "Máy Móc", 90, "center"),
+            ("tot", "SL Kiểm", 75, "e"),
+            ("def", "SL Lỗi", 70, "e"),
+            ("rate", "Tỷ Lệ (%)", 85, "e"),
+            ("resp", "Người Chịu TN", 130, "w"),
+            ("pic", "Người Phụ Trách", 125, "w"),
+            ("img", "Ảnh Lỗi", 110, "center"),
+            ("desc", "Mô Tả Hiện Tượng Lỗi", 230, "w"),
+            ("cause", "Nguyên Nhân", 210, "w"),
+            ("counter", "Biện Pháp Cải Tiến", 230, "w"),
+            ("sop", "Tiêu Chuẩn SOP", 115, "center"),
+            ("prog", "Tiến Độ", 115, "center"),
+            ("notes", "Ghi Chú", 160, "w")
+        ]
 
-        self.tree.column("stt", width=42, anchor="center")
-        self.tree.column("date", width=85, anchor="center")
-        self.tree.column("process", width=80, anchor="center")
-        self.tree.column("product", width=120, anchor="w")
-        self.tree.column("machine", width=75, anchor="center")
-        self.tree.column("tot", width=65, anchor="e")
-        self.tree.column("def", width=60, anchor="e")
-        self.tree.column("rate", width=70, anchor="e")
-        self.tree.column("pic", width=95, anchor="w")
-        self.tree.column("prog", width=95, anchor="center")
-        self.tree.column("img", width=45, anchor="center")
+        for col_id, col_name, col_w, col_align in headers_meta:
+            self.tree.heading(col_id, text=col_name)
+            self.tree.column(col_id, width=col_w, anchor=col_align, minwidth=40)
 
         vsb = ttk.Scrollbar(tree_container, orient="vertical", command=self.tree.yview)
         hsb = ttk.Scrollbar(tree_container, orient="horizontal", command=self.tree.xview)
@@ -775,95 +1324,20 @@ class AnomalyReportView(ctk.CTkFrame):
         vsb.pack(side="right", fill="y")
         hsb.pack(side="bottom", fill="x")
 
+        # Treeview Interactions
         self.tree.bind("<<TreeviewSelect>>", self._on_row_select)
+        self.tree.bind("<Double-Button-1>", self._on_row_double_click)
+        self.tree.bind("<ButtonRelease-1>", self._on_tree_cell_click)
+        self.tree.bind("<Button-3>", self._show_context_menu)
 
-        # Right Panel (Inspection Card)
-        self.p_right = ctk.CTkFrame(workspace, fg_color=BG_CARD, corner_radius=12,
-                                    border_width=1, border_color=BORDER_CLR, width=340)
-        self.p_right.pack(side="right", fill="y", padx=(0, 0))
-        self.p_right.pack_propagate(False)
-        self._build_detail_panel(self.p_right)
-
-    def _build_detail_panel(self, parent):
-        # Header
-        top_d = ctk.CTkFrame(parent, fg_color="transparent")
-        top_d.pack(fill="x", padx=16, pady=(14, 8))
-
-        ctk.CTkLabel(top_d, text="🔍 Chi Tiết Báo Cáo", font=FONT_H1, text_color=ACCENT_TEAL).pack(side="left")
-
-        # Image preview box
-        self.img_card = ctk.CTkFrame(parent, fg_color=BG_SURFACE, corner_radius=8, height=160)
-        self.img_card.pack(fill="x", padx=16, pady=(0, 8))
-        self.img_card.pack_propagate(False)
-
-        self.lbl_detail_thumb = ctk.CTkLabel(self.img_card, text="[Chọn 1 báo cáo để xem chi tiết]",
-                                             font=FONT_BODY, text_color=TEXT_MUTED)
-        self.lbl_detail_thumb.pack(fill="both", expand=True, padx=8, pady=8)
-        self.lbl_detail_thumb.bind("<Button-1>", lambda e: self._open_image_viewer())
-
-        self.btn_view_full_img = ctk.CTkButton(
-            parent, text="🔍 Phóng To Ảnh (Zoom In)", height=30, font=FONT_SMALL,
-            fg_color=BG_SURFACE, text_color=TEXT_PRIMARY, hover_color=BG_HOVER,
-            command=self._open_image_viewer
-        )
-        self.btn_view_full_img.pack(fill="x", padx=16, pady=(0, 8))
-
-        # Details scrollable container
-        d_scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent")
-        d_scroll.pack(fill="both", expand=True, padx=12, pady=4)
-
-        self.lbl_d_product = ctk.CTkLabel(d_scroll, text="Sản phẩm: --", font=FONT_H2, text_color=TEXT_PRIMARY, anchor="w")
-        self.lbl_d_product.pack(fill="x", pady=2)
-
-        self.lbl_d_meta = ctk.CTkLabel(d_scroll, text="Công đoạn: --  |  Máy: --", font=FONT_SMALL, text_color=TEXT_MUTED, anchor="w")
-        self.lbl_d_meta.pack(fill="x", pady=2)
-
-        self.lbl_d_stats = ctk.CTkLabel(d_scroll, text="SL KT: 0  |  SL Lỗi: 0  |  Tỷ lệ: 0%", font=FONT_BOLD, text_color=ACCENT_AMBER, anchor="w")
-        self.lbl_d_stats.pack(fill="x", pady=2)
-
-        self.lbl_d_people = ctk.CTkLabel(d_scroll, text="QL: --  |  PIC: --", font=FONT_SMALL, text_color=TEXT_MUTED, anchor="w")
-        self.lbl_d_people.pack(fill="x", pady=2)
-
-        ctk.CTkFrame(d_scroll, fg_color=BORDER_CLR, height=1).pack(fill="x", pady=6)
-
-        ctk.CTkLabel(d_scroll, text="Mô tả hiện tượng lỗi:", font=FONT_BOLD, text_color=ACCENT_TEAL, anchor="w").pack(fill="x")
-        self.lbl_d_desc = ctk.CTkLabel(d_scroll, text="--", font=FONT_BODY, text_color=TEXT_PRIMARY,
-                                       anchor="w", justify="left", wraplength=280)
-        self.lbl_d_desc.pack(fill="x", pady=(2, 6))
-
-        ctk.CTkLabel(d_scroll, text="Nguyên nhân:", font=FONT_BOLD, text_color=ACCENT_TEAL, anchor="w").pack(fill="x")
-        self.lbl_d_cause = ctk.CTkLabel(d_scroll, text="--", font=FONT_BODY, text_color=TEXT_PRIMARY,
-                                        anchor="w", justify="left", wraplength=280)
-        self.lbl_d_cause.pack(fill="x", pady=(2, 6))
-
-        ctk.CTkLabel(d_scroll, text="Biện pháp cải tiến:", font=FONT_BOLD, text_color=ACCENT_TEAL, anchor="w").pack(fill="x")
-        self.lbl_d_counter = ctk.CTkLabel(d_scroll, text="--", font=FONT_BODY, text_color=TEXT_PRIMARY,
-                                          anchor="w", justify="left", wraplength=280)
-        self.lbl_d_counter.pack(fill="x", pady=(2, 6))
-
-        self.lbl_d_sop = ctk.CTkLabel(d_scroll, text="SOP: --", font=FONT_SMALL, text_color=TEXT_MUTED, anchor="w")
-        self.lbl_d_sop.pack(fill="x", pady=2)
-
-        self.lbl_d_notes = ctk.CTkLabel(d_scroll, text="Ghi chú: --", font=FONT_SMALL, text_color=TEXT_MUTED, anchor="w")
-        self.lbl_d_notes.pack(fill="x", pady=2)
-
-        # Bottom Actions on Selected Item
-        act_row = ctk.CTkFrame(parent, fg_color="transparent")
-        act_row.pack(fill="x", padx=16, pady=(8, 14))
-
-        self.btn_edit = ctk.CTkButton(
-            act_row, text="✏️ Chỉnh Sửa", height=36, corner_radius=8,
-            fg_color=BG_SURFACE, text_color=TEXT_PRIMARY, hover_color=BG_HOVER,
-            font=FONT_SMALL, command=self._on_edit_report
-        )
-        self.btn_edit.pack(side="left", fill="x", expand=True, padx=(0, 4))
-
-        self.btn_delete = ctk.CTkButton(
-            act_row, text="🗑️ Xóa", height=36, corner_radius=8,
-            fg_color=BG_SURFACE, text_color=ACCENT_RED, hover_color=BG_HOVER,
-            font=FONT_SMALL, command=self._on_delete_report
-        )
-        self.btn_delete.pack(side="right", fill="x", expand=True, padx=(4, 0))
+        # Context Menu
+        self.ctx_menu = tk.Menu(self, tearoff=0)
+        self.ctx_menu.add_command(label="🖼️ Soi & Đánh Dấu Ảnh Lỗi (Studio)", command=self._open_marking_studio)
+        self.ctx_menu.add_separator()
+        self.ctx_menu.add_command(label="✏️ Chỉnh Sửa Báo Cáo", command=self._on_edit_report)
+        self.ctx_menu.add_command(label="🗑️ Xóa Báo Cáo Này", command=self._on_delete_report)
+        self.ctx_menu.add_separator()
+        self.ctx_menu.add_command(label="📋 Sao Chép Thông Tin Dòng", command=self._copy_row_info)
 
     # ── DATA FETCH & POPULATE ────────────────────────────────────────────────
     def refresh_data(self):
@@ -873,14 +1347,16 @@ class AnomalyReportView(ctk.CTkFrame):
         def _fetch():
             try:
                 reps = svc.fetch_all_reports()
-                self.after(0, lambda: self._on_fetch_success(reps))
+                safe_after(self, 0, lambda: self._on_fetch_success(reps))
             except Exception as e:
-                self.after(0, lambda: self._on_fetch_error(str(e)))
+                safe_after(self, 0, lambda: self._on_fetch_error(str(e)))
 
         threading.Thread(target=_fetch, daemon=True).start()
 
     def _on_fetch_success(self, reports: list[dict]):
         self.all_reports = reports
+        self.selected_report = None
+        self._update_action_buttons_state()
         self.btn_refresh.configure(state="normal", text="🔄 Làm Mới")
         self._apply_filter()
         if hasattr(self.app, "show_toast"):
@@ -898,15 +1374,12 @@ class AnomalyReportView(ctk.CTkFrame):
 
         res = []
         for r in self.all_reports:
-            # Process filter
             if f_proc != "Tất cả công đoạn" and str(r.get("process")).lower() != f_proc.lower():
                 continue
-            # Progress filter
             if f_prog != "Tất cả tiến độ" and str(r.get("progress")).lower() != f_prog.lower():
                 continue
-            # Text search filter
             if q:
-                searchable = f"{r.get('product_name', '')} {r.get('process', '')} {r.get('machine', '')} {r.get('pic', '')} {r.get('responsible_person', '')} {r.get('description', '')}".lower()
+                searchable = f"{r.get('product_name', '')} {r.get('process', '')} {r.get('machine', '')} {r.get('pic', '')} {r.get('responsible_person', '')} {r.get('description', '')} {r.get('root_cause', '')} {r.get('countermeasures', '')}".lower()
                 if q not in searchable:
                     continue
             res.append(r)
@@ -918,10 +1391,15 @@ class AnomalyReportView(ctk.CTkFrame):
         self.tree.delete(*self.tree.get_children())
         self.lbl_tbl_count.configure(text=f"Danh Sách Báo Cáo: {len(reports)} bản ghi")
 
+        # Clear selection state if empty
+        if not reports:
+            self.selected_report = None
+            self._update_action_buttons_state()
+
         for idx, r in enumerate(reports, 1):
             rate_val = r.get("defect_rate")
             rate_str = f"{rate_val:.2f}%" if rate_val is not None else "0.00%"
-            has_img = "📷" if r.get("image_url") else ""
+            has_img = "🖼️ Xem / Vẽ" if r.get("image_url") else "—"
 
             tag = "even" if idx % 2 == 0 else "odd"
             prog = str(r.get("progress") or "")
@@ -936,73 +1414,99 @@ class AnomalyReportView(ctk.CTkFrame):
                 r.get("process", ""),
                 r.get("product_name", ""),
                 r.get("machine", ""),
-                r.get("total_qty", 0),
-                r.get("defect_qty", 0),
+                f"{r.get('total_qty', 0):,}",
+                f"{r.get('defect_qty', 0):,}",
                 rate_str,
+                r.get("responsible_person", ""),
                 r.get("pic", ""),
+                has_img,
+                r.get("description", ""),
+                r.get("root_cause", ""),
+                r.get("countermeasures", ""),
+                r.get("sop_standard", ""),
                 r.get("progress", "Đang thực hiện"),
-                has_img
+                r.get("notes", "")
             )
             self.tree.insert("", "end", iid=str(r.get("id")), values=vals, tags=(tag,))
 
     def _on_row_select(self, event):
         selected_ids = self.tree.selection()
         if not selected_ids:
+            self.selected_report = None
+            self._update_action_buttons_state()
             return
         rep_id = selected_ids[0]
         found = [r for r in self.all_reports if str(r.get("id")) == str(rep_id)]
         if found:
             self.selected_report = found[0]
-            self._display_detail(self.selected_report)
+            self._update_action_buttons_state()
 
-    def _display_detail(self, r: dict):
-        self.lbl_d_product.configure(text=f"Sản phẩm: {r.get('product_name', '--')}")
-        self.lbl_d_meta.configure(text=f"Công đoạn: {r.get('process', '--')}  |  Máy: {r.get('machine', '--')}")
-
-        rate_val = r.get("defect_rate", 0.0)
-        rate_str = f"{rate_val:.2f}%" if rate_val is not None else "0.00%"
-        self.lbl_d_stats.configure(text=f"SL KT: {r.get('total_qty', 0):,}  |  SL Lỗi: {r.get('defect_qty', 0):,}  |  Tỷ lệ: {rate_str}")
-
-        self.lbl_d_people.configure(text=f"QL: {r.get('responsible_person', '--')}  |  PIC: {r.get('pic', '--')}")
-        self.lbl_d_desc.configure(text=r.get("description") or "--")
-        self.lbl_d_cause.configure(text=r.get("root_cause") or "--")
-        self.lbl_d_counter.configure(text=r.get("countermeasures") or "--")
-        self.lbl_d_sop.configure(text=f"SOP: {r.get('sop_standard', '--')}")
-        self.lbl_d_notes.configure(text=f"Ghi chú: {r.get('notes', '--')}")
-
-        img_url = r.get("image_url")
-        if img_url:
-            self.lbl_detail_thumb.configure(image="", text="⏳ Đang tải ảnh...")
-            self.btn_view_full_img.configure(state="normal")
-            self._fetch_thumb_async(img_url)
+    def _on_row_double_click(self, event):
+        """Double clicking a row opens Marking Studio if image exists, else edit dialog."""
+        if not self.selected_report:
+            return
+        if self.selected_report.get("image_url"):
+            self._open_marking_studio()
         else:
-            self.lbl_detail_thumb.configure(image="", text="[Báo cáo này không có ảnh]")
-            self.btn_view_full_img.configure(state="disabled")
+            self._on_edit_report()
 
-    def _fetch_thumb_async(self, url: str):
-        def _fetch():
+    def _on_tree_cell_click(self, event):
+        """Clicking directly on the 'Ảnh Lỗi' column cell immediately opens the Marking Studio."""
+        region = self.tree.identify_region(event.x, event.y)
+        if region == "cell":
+            col_id = self.tree.identify_column(event.x)
+            row_id = self.tree.identify_row(event.y)
+            if row_id and col_id == "#11":  # Column 11: 'img' (Ảnh Lỗi)
+                self.tree.selection_set(row_id)
+                self._on_row_select(None)
+                found = [r for r in self.all_reports if str(r.get("id")) == str(row_id)]
+                if found:
+                    if found[0].get("image_url"):
+                        self.after(50, self._open_marking_studio)
+                    else:
+                        if messagebox.askyesno("Chưa có ảnh", "Báo cáo này chưa có hình ảnh đính kèm.\nBạn có muốn mở để thêm ảnh không?"):
+                            self._on_edit_report()
+
+    def _update_action_buttons_state(self):
+        has_sel = self.selected_report is not None
+        self.btn_edit.configure(state="normal" if has_sel else "disabled")
+        self.btn_delete.configure(state="normal" if has_sel else "disabled")
+        has_img = has_sel and bool(self.selected_report.get("image_url"))
+        self.btn_open_marking.configure(state="normal" if has_img else "disabled")
+
+    def _show_context_menu(self, event):
+        item = self.tree.identify_row(event.y)
+        if item:
+            self.tree.selection_set(item)
+            self._on_row_select(None)
             try:
-                import urllib.request
-                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=10, context=svc.get_ssl_context()) as resp:
-                    raw = resp.read()
-                im = Image.open(io.BytesIO(raw))
-                im.thumbnail((260, 140))
-                self._current_thumb_tk = ImageTk.PhotoImage(im)
-                self.after(0, lambda: self.lbl_detail_thumb.configure(image=self._current_thumb_tk, text=""))
-            except Exception:
-                self.after(0, lambda: self.lbl_detail_thumb.configure(text="[Ảnh trên Cloud - Click để mở]"))
+                self.ctx_menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                self.ctx_menu.grab_release()
 
-        threading.Thread(target=_fetch, daemon=True).start()
+    def _copy_row_info(self):
+        if not self.selected_report:
+            return
+        r = self.selected_report
+        line = f"Sản phẩm: {r.get('product_name')} | Công đoạn: {r.get('process')} | Ngày: {r.get('report_date')} | Lỗi: {r.get('description')} | Tỷ lệ: {r.get('defect_rate')}%"
+        self.clipboard_clear()
+        self.clipboard_append(line)
+        if hasattr(self.app, "show_toast"):
+            self.app.show_toast("📋 Đã sao chép thông tin báo cáo vào Clipboard!")
 
-    def _open_image_viewer(self):
-        if self.selected_report and self.selected_report.get("image_url"):
-            ImageZoomViewer(self, self.selected_report["image_url"],
-                            title=f"Ảnh Lỗi: {self.selected_report.get('product_name')} ({self.selected_report.get('process')})")
+    # ── OPEN IMAGE MARKING STUDIO ────────────────────────────────────────────
+    def _open_marking_studio(self):
+        if not self.selected_report or not self.selected_report.get("image_url"):
+            messagebox.showinfo("Không có ảnh", "Báo cáo này không có hình ảnh đính kèm để xem hoặc đánh dấu.")
+            return
+
+        def _on_img_updated(new_rep):
+            self.refresh_data()
+
+        AnomalyImageStudioWindow(self, self.selected_report, on_image_updated=_on_img_updated)
 
     # ── ADMIN & PASSWORD VERIFICATION ────────────────────────────────────────
     def _require_admin(self, callback):
-        """Executes callback if already unlocked in session, otherwise prompts for password."""
         if self.is_admin_session:
             callback()
         else:
@@ -1014,8 +1518,10 @@ class AnomalyReportView(ctk.CTkFrame):
 
     def _toggle_admin_lock(self):
         if self.is_admin_session:
-            # Offer to lock or change password
-            m = messagebox.askyesnocancel("Quản Trị", "Bạn đang ở chế độ Quản Trị.\n\n• Chọn YES để Khóa lại\n• Chọn NO để Đổi Mật Khẩu\n• Chọn CANCEL để đóng")
+            m = messagebox.askyesnocancel(
+                "Quản Trị",
+                "Bạn đang ở chế độ Quản Trị.\n\n• Chọn YES để Khóa lại\n• Chọn NO để Đổi Mật Khẩu\n• Chọn CANCEL để đóng"
+            )
             if m is True:
                 self.is_admin_session = False
                 self.btn_admin_lock.configure(text="🔒 Admin: Đã Khóa", fg_color=BG_SURFACE, text_color=TEXT_PRIMARY)
@@ -1040,7 +1546,7 @@ class AnomalyReportView(ctk.CTkFrame):
 
     def _on_edit_report(self):
         if not self.selected_report:
-            messagebox.showwarning("Chưa chọn", "Vui lòng chọn một báo cáo trên bảng để chỉnh sửa!")
+            messagebox.showwarning("Chưa chọn", "Vui lòng click chọn một báo cáo trên bảng để chỉnh sửa!")
             return
         self._require_admin(lambda: AnomalyEditDialog(self, report_data=self.selected_report, on_saved=self._on_report_updated))
 
@@ -1051,7 +1557,7 @@ class AnomalyReportView(ctk.CTkFrame):
 
     def _on_delete_report(self):
         if not self.selected_report:
-            messagebox.showwarning("Chưa chọn", "Vui lòng chọn một báo cáo trên bảng để xóa!")
+            messagebox.showwarning("Chưa chọn", "Vui lòng click chọn một báo cáo trên bảng để xóa!")
             return
 
         rep = self.selected_report
@@ -1064,6 +1570,7 @@ class AnomalyReportView(ctk.CTkFrame):
                 ok = svc.delete_report(rep["id"], rep.get("image_url"))
                 if ok:
                     self.selected_report = None
+                    self._update_action_buttons_state()
                     self.refresh_data()
                     if hasattr(self.app, "show_toast"):
                         self.app.show_toast("🗑️ Đã xóa báo cáo và ảnh trên Cloud thành công!")
@@ -1087,7 +1594,10 @@ class AnomalyReportView(ctk.CTkFrame):
         if f:
             try:
                 saved = svc.export_reports_to_excel(self.filtered_reports, f)
-                ask_open = messagebox.askyesno("Xuất Thành Công", f"Đã xuất {len(self.filtered_reports)} báo cáo ra Excel:\n{saved}\n\nBạn có muốn mở file ngay không?")
+                ask_open = messagebox.askyesno(
+                    "Xuất Thành Công",
+                    f"Đã xuất {len(self.filtered_reports)} báo cáo ra Excel:\n{saved}\n\nBạn có muốn mở file ngay không?"
+                )
                 if ask_open:
                     os.startfile(saved)
             except Exception as e:
@@ -1110,7 +1620,7 @@ class AnomalyReportView(ctk.CTkFrame):
                         background=tree_bg,
                         fieldbackground=tree_bg,
                         foreground=tree_fg,
-                        rowheight=28,
+                        rowheight=30,
                         font=("Segoe UI", 10),
                         borderwidth=0)
         style.configure("Anomaly.Treeview.Heading",
@@ -1122,7 +1632,7 @@ class AnomalyReportView(ctk.CTkFrame):
                   background=[("selected", sel_bg)],
                   foreground=[("selected", sel_fg)])
 
-        self.tree.tag_configure("odd",  background=odd_bg)
+        self.tree.tag_configure("odd", background=odd_bg)
         self.tree.tag_configure("even", background=even_bg)
         self.tree.tag_configure("tag_done", background="#064E3B" if is_dark else "#DCFCE7",
                                 foreground="#A7F3D0" if is_dark else "#166534")
