@@ -1657,27 +1657,27 @@ class AnomalyReportView(ctk.CTkFrame):
         self.tree.column("#0", width=75, minwidth=65, anchor="center", stretch=False)
 
         headers_meta = [
-            ("stt", "STT", 45, "center"),
-            ("date", "Ngày Tháng", 100, "center"),
-            ("process", "Công Đoạn", 90, "center"),
-            ("product", "Sản Phẩm (Model/PWB)", 160, "w"),
-            ("machine", "Máy Móc / Line", 110, "center"),
-            ("tot", "SL Kiểm", 85, "e"),
-            ("def", "SL Lỗi", 80, "e"),
-            ("rate", "Tỷ Lệ (%)", 85, "e"),
-            ("resp", "Người Chịu TN", 135, "w"),
-            ("pic", "Người Phụ Trách", 125, "w"),
-            ("desc", "Mô Tả Hiện Tượng Lỗi", 280, "w"),
-            ("cause", "Nguyên Nhân", 250, "w"),
-            ("counter", "Biện Pháp Cải Tiến", 280, "w"),
+            ("stt", "STT", 50, "center"),
+            ("date", "Ngày Tháng", 105, "center"),
+            ("process", "Công Đoạn", 95, "center"),
+            ("product", "Sản Phẩm (Model/PWB)", 170, "center"),
+            ("machine", "Máy Móc / Line", 115, "center"),
+            ("tot", "SL Kiểm", 90, "center"),
+            ("def", "SL Lỗi", 85, "center"),
+            ("rate", "Tỷ Lệ (%)", 90, "center"),
+            ("resp", "Người Chịu TN", 140, "center"),
+            ("pic", "Người Phụ Trách", 130, "center"),
+            ("desc", "Mô Tả Hiện Tượng Lỗi", 280, "center"),
+            ("cause", "Nguyên Nhân", 250, "center"),
+            ("counter", "Biện Pháp Cải Tiến", 280, "center"),
             ("sop", "Tiêu Chuẩn SOP", 125, "center"),
             ("prog", "Tiến Độ", 125, "center"),
-            ("notes", "Ghi Chú", 180, "w")
+            ("notes", "Ghi Chú", 180, "center")
         ]
 
         for col_id, col_name, col_w, col_align in headers_meta:
-            self.tree.heading(col_id, text=col_name)
-            self.tree.column(col_id, width=col_w, anchor=col_align, minwidth=45)
+            self.tree.heading(col_id, text=col_name, anchor="center")
+            self.tree.column(col_id, width=col_w, anchor="center", minwidth=45)
 
         vsb = ttk.Scrollbar(tree_container, orient="vertical", command=self.tree.yview)
         hsb = ttk.Scrollbar(tree_container, orient="horizontal", command=self.tree.xview)
