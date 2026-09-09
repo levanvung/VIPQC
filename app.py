@@ -4181,6 +4181,53 @@ class SeriesBOMCompareView(ctk.CTkFrame):
     def t(self, key: str, **kwargs) -> str:
         return self.app.t(key, **kwargs)
 
+    def handle_drop_files(self, files):
+        """Loads dropped BOM files into the currently active Series slots."""
+        supported = []
+        for item in files:
+            if isinstance(item, bytes):
+                item = item.decode("utf-8", errors="ignore")
+            path = os.path.normpath(str(item))
+            if os.path.isfile(path) and os.path.splitext(path)[1].lower() in {".pdf", ".xlsx", ".xls", ".xlsm"}:
+                supported.append(path)
+
+        loaded_count = 0
+        for path in supported:
+            if not self.file_a:
+                loaded_count += int(self._load_file(path, "a"))
+            elif not self.file_b and os.path.abspath(path) != os.path.abspath(self.file_a):
+                loaded_count += int(self._load_file(path, "b"))
+
+        if loaded_count == 0 and supported:
+            self.app.show_toast("⚠️ Đã đủ 2 file BOM. Nhấn 'Đặt lại' để chọn cặp mới.")
+        elif len(supported) > 2:
+            self.app.show_toast("⚠️ Chỉ nạp 2 file đầu tiên vào Series A/B.")
+
+    def _load_file(self, filepath: str, slot: str):
+        """Validates and displays one BOM file for Series A or B."""
+        if not os.path.exists(filepath):
+            return False
+        size = os.path.getsize(filepath)
+        if size > MAX_FILE_SIZE_BYTES:
+            messagebox.showwarning("File quá lớn", f"File '{os.path.basename(filepath)}' vượt quá 10MB!")
+            return False
+
+        model, series = sbc.extract_model_and_series(os.path.basename(filepath))
+        name_label = self.lbl_file_a_name if slot == "a" else self.lbl_file_b_name
+        meta_label = self.lbl_file_a_meta if slot == "a" else self.lbl_file_b_meta
+        if slot == "a":
+            self.file_a = filepath
+            series_label = series or "Gốc"
+        else:
+            self.file_b = filepath
+            series_label = series or "Mới"
+        name_label.configure(text=f"{os.path.basename(filepath)} ({format_file_size(size)})")
+        meta_label.configure(text=f"Model: {model} | Series: {series_label}")
+        if self.file_a and self.file_b:
+            self.btn_run_compare.configure(state="normal")
+        self.app.set_status(f"Đã nạp BOM Series {'A' if slot == 'a' else 'B'}: {os.path.basename(filepath)}")
+        return True
+
     def _build_ui(self):
         # ── 1. TOP CONTAINER: 2 UPLOAD CARDS + ACTIONS ───────────────────────
         top_container = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=12,
@@ -4251,7 +4298,7 @@ class SeriesBOMCompareView(ctk.CTkFrame):
         self.btn_run_compare = ctk.CTkButton(
             act_box, text="⚡ SO SÁNH 2 BOM", font=("Segoe UI", 11, "bold"),
             height=34, width=160, fg_color=ACCENT_TEAL, hover_color="#0F766E",
-            command=self._start_compare
+            state="disabled", command=self._start_compare
         )
         self.btn_run_compare.pack(fill="x", pady=(1, 3))
 
@@ -4261,6 +4308,13 @@ class SeriesBOMCompareView(ctk.CTkFrame):
             state="disabled", command=self._export_excel
         )
         self.btn_export_fai.pack(fill="x", pady=(1, 0))
+
+        self.btn_reset_bom = ctk.CTkButton(
+            act_box, text="↺ Đặt lại", font=("Segoe UI", 9, "bold"),
+            height=24, width=160, fg_color=BG_SURFACE, hover_color=BG_HOVER,
+            text_color=TEXT_PRIMARY, command=self._reset_inputs
+        )
+        self.btn_reset_bom.pack(fill="x", pady=(4, 0))
 
         # ── 2. VALIDATION & STATS BANNER ─────────────────────────────────────
         self.banner_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -4445,13 +4499,7 @@ class SeriesBOMCompareView(ctk.CTkFrame):
         )
         if not f:
             return
-        if os.path.getsize(f) > MAX_FILE_SIZE_BYTES:
-            messagebox.showwarning("File quá lớn", f"File '{os.path.basename(f)}' vượt quá 10MB!")
-            return
-        self.file_a = f
-        self.lbl_file_a_name.configure(text=f"{os.path.basename(f)} ({format_file_size(os.path.getsize(f))})")
-        model, series = sbc.extract_model_and_series(os.path.basename(f))
-        self.lbl_file_a_meta.configure(text=f"Model: {model} | Series: {series or 'Gốc'}")
+        self._load_file(f, "a")
 
     def _select_file_b(self):
         f = filedialog.askopenfilename(
@@ -4460,13 +4508,7 @@ class SeriesBOMCompareView(ctk.CTkFrame):
         )
         if not f:
             return
-        if os.path.getsize(f) > MAX_FILE_SIZE_BYTES:
-            messagebox.showwarning("File quá lớn", f"File '{os.path.basename(f)}' vượt quá 10MB!")
-            return
-        self.file_b = f
-        self.lbl_file_b_name.configure(text=f"{os.path.basename(f)} ({format_file_size(os.path.getsize(f))})")
-        model, series = sbc.extract_model_and_series(os.path.basename(f))
-        self.lbl_file_b_meta.configure(text=f"Model: {model} | Series: {series or 'Mới'}")
+        self._load_file(f, "b")
 
     # ── HOLOGRAPHIC CYBERPUNK HUD LOADING CARD ───────────────────────────────
     def _show_loading_hud(self, title: str = "VIPQC AI — SO SÁNH DỮ LIỆU 2 BOM"):
@@ -4531,6 +4573,37 @@ class SeriesBOMCompareView(ctk.CTkFrame):
             except Exception:
                 pass
             self._loading_hud = None
+
+    def _reset_inputs(self):
+        """Clears the current BOM pair, comparison result, and QC checks."""
+        if self.is_comparing:
+            self.app.show_toast("⏳ Đang phân tích, hãy chờ hoàn tất trước khi đặt lại.")
+            return
+
+        self.file_a = None
+        self.file_b = None
+        self.bom_a_data = None
+        self.bom_b_data = None
+        self.comparison_result = None
+        self.qc_status_map = {}
+        self.active_loc = None
+
+        self.lbl_file_a_name.configure(text="Chưa chọn BOM Series A")
+        self.lbl_file_a_meta.configure(text="Model: — | Series: —")
+        self.lbl_file_b_name.configure(text="Chưa chọn BOM Series B")
+        self.lbl_file_b_meta.configure(text="Model: — | Series: —")
+        self.lbl_validation.configure(
+            text="💡 Vui lòng chọn 2 file BOM (PDF hoặc Excel) rồi nhấn '⚡ SO SÁNH 2 BOM'.",
+            text_color=TEXT_MUTED
+        )
+        self.btn_run_compare.configure(state="disabled", text="⚡ SO SÁNH 2 BOM")
+        self.btn_export_fai.configure(state="disabled")
+        for _, value_label, color in self.kpi_boxes.values():
+            value_label.configure(text="0", text_color=color)
+        self.kpi_boxes["matched"][1].configure(text="0 (0%)")
+        self._populate_table()
+        self._update_progress()
+        self.app.set_status("Đã đặt lại cặp BOM Series.")
 
     # ── COMPARE ENGINE EXECUTION ─────────────────────────────────────────────
     def _start_compare(self):
@@ -5853,6 +5926,10 @@ class BOMExtractorApp(ctk.CTk):
 
         if self.current_nav == "model_comp":
             self.view_model_compare.handle_drop_files(files)
+            return
+
+        if self.current_nav == "series_bom":
+            self.view_series_bom_compare.handle_drop_files(files)
             return
 
         if self.current_nav == "compare" or has_excel:
