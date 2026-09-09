@@ -97,20 +97,27 @@ def build():
 
     exe_path = os.path.join("dist", "VIPQC AI.exe")
     if os.path.exists(exe_path):
-        target_path = "VIPQC AI.exe"
-        shutil.copy2(exe_path, target_path)
-        shutil.rmtree("dist", ignore_errors=True)
-        shutil.rmtree("build", ignore_errors=True)
-        size_mb = os.path.getsize(target_path) / (1024 * 1024)
-        # Notify Windows Shell to refresh icon cache
         try:
-            import ctypes
-            ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0000, None, None)
-        except Exception:
-            pass
-        print("=" * 60)
-        print(f"BUILD SUCCESSFUL!  ->  {target_path}  ({size_mb:.1f} MB)")
-        print("=" * 60)
+            shutil.copy2(exe_path, target_path)
+            shutil.rmtree("dist", ignore_errors=True)
+            shutil.rmtree("build", ignore_errors=True)
+            size_mb = os.path.getsize(target_path) / (1024 * 1024)
+            # Notify Windows Shell to refresh icon cache
+            try:
+                import ctypes
+                ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0000, None, None)
+            except Exception:
+                pass
+            print("=" * 60)
+            print(f"BUILD SUCCESSFUL!  ->  {target_path}  ({size_mb:.1f} MB)")
+            print("=" * 60)
+        except PermissionError:
+            size_mb = os.path.getsize(exe_path) / (1024 * 1024)
+            print("\n" + "!" * 60)
+            print(f"[CẢNH BÁO] Không thể ghi đè '{target_path}' do ứng dụng đang chạy!")
+            print(f"Bản build mới đã được tạo thành công tại: '{exe_path}' ({size_mb:.1f} MB)")
+            print("Vui lòng tắt cửa sổ ứng dụng đang mở để cập nhật đè file ngoài thư mục gốc.")
+            print("!" * 60 + "\n")
     else:
         print("ERROR: dist/VIPQC AI.exe not found!")
         sys.exit(1)

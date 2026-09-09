@@ -1562,6 +1562,14 @@ class AnomalyDrawerFrame(ctk.CTkFrame):
 
         def _get():
             b = svc.download_image_bytes(url)
+            if not b and (url.startswith("http://") or url.startswith("https://")):
+                try:
+                    import urllib.request
+                    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(req, timeout=15, context=svc.get_ssl_context()) as resp:
+                        b = resp.read()
+                except Exception:
+                    b = None
             if b:
                 safe_after(self, 0, lambda: self._show_thumb_from_bytes(b))
             else:
@@ -1891,6 +1899,11 @@ class AnomalyReportView(ctk.CTkFrame):
         def _fetch():
             try:
                 b = svc.download_image_bytes(url)
+                if not b and (url.startswith("http://") or url.startswith("https://")):
+                    import urllib.request
+                    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(req, timeout=15, context=svc.get_ssl_context()) as resp:
+                        b = resp.read()
                 if not b:
                     return
                 orig_im = Image.open(io.BytesIO(b))
@@ -1903,6 +1916,7 @@ class AnomalyReportView(ctk.CTkFrame):
                 def _apply():
                     photo = ImageTk.PhotoImage(thumb_im)
                     self._thumb_cache[url] = photo
+                    self._thumb_cache[str(report_id)] = photo
                     try:
                         if self.tree.exists(report_id):
                             self.tree.item(report_id, image=photo)
@@ -2040,7 +2054,7 @@ class AnomalyReportView(ctk.CTkFrame):
 
         style = ttk.Style()
         style.configure("Anomaly.Treeview", rowheight=60, font=("Segoe UI", 12))
-        style.configure("Anomaly.Treeview.Heading", font=("Segoe UI", 12, "bold"), padding=6)
+        style.configure("Anomaly.Treeview.Heading", font=("Segoe UI", 11, "bold"), padding=[6, 8])
 
         cols = (
             "stt", "date", "process", "product", "machine", "tot", "def", "rate",
@@ -2050,31 +2064,31 @@ class AnomalyReportView(ctk.CTkFrame):
                                  style="Anomaly.Treeview", selectmode="browse")
 
         # ── PERMANENT TRILINGUAL COLUMN HEADERS (ENGLISH / TIẾNG VIỆT / 中文) ──
-        self.tree.heading("#0", text="Image / Ảnh / 图片", anchor="center")
-        self.tree.column("#0", width=145, minwidth=120, anchor="center", stretch=False)
+        self.tree.heading("#0", text="Image / Ảnh\n图片", anchor="center")
+        self.tree.column("#0", width=120, minwidth=100, anchor="center", stretch=False)
 
         headers_meta = [
-            ("stt",     "No. / STT / 序号",                         115, "center"),
-            ("date",    "Date / Ngày / 日期",                       145, "center"),
-            ("process", "Process / Công Đoạn / 过程",               185, "center"),
-            ("product", "Product / Sản Phẩm / 产品 (Model/PWB)",    250, "center"),
-            ("machine", "Machine / Thiết Bị / 设备 (Line)",         205, "center"),
-            ("tot",     "Total / SL Kiểm / 检查数",                 175, "center"),
-            ("def",     "Defect / SL Lỗi / 不良数",                 175, "center"),
-            ("rate",    "Rate / Tỷ Lệ / 不良率 (%)",                180, "center"),
-            ("resp",    "Resp. / Chịu TN / 责任人",                 185, "center"),
-            ("pic",     "PIC / Phụ Trách / 担当者",                 175, "center"),
-            ("desc",    "Defect / Mô Tả Hiện Tượng / 不良现象描述", 340, "center"),
-            ("cause",   "Cause / Nguyên Nhân / 原因分析",           290, "center"),
-            ("counter", "Action / Biện Pháp / 改善对策",            310, "center"),
-            ("sop",     "SOP / Tiêu Chuẩn / SOP标准",               180, "center"),
-            ("prog",    "Progress / Tiến Độ / 进度",                175, "center"),
-            ("notes",   "Notes / Ghi Chú / 备注",                   200, "center")
+            ("stt",     "No. / STT\n序号",                         90,  "center"),
+            ("date",    "Date / Ngày\n日期",                       140, "center"),
+            ("process", "Process / Công Đoạn\n工序 (过程)",        170, "center"),
+            ("product", "Product / Sản Phẩm\n产品 (Model/PWB)",    260, "center"),
+            ("machine", "Machine / Thiết Bị\n设备 (Line/Chuyền)",  200, "center"),
+            ("tot",     "Total / SL Kiểm\n检查数",                 135, "center"),
+            ("def",     "Defect / SL Lỗi\n不良数",                 135, "center"),
+            ("rate",    "Rate / Tỷ Lệ\n不良率 (%)",                140, "center"),
+            ("resp",    "Resp. / Chịu TN\n责任人 (Manager)",       185, "center"),
+            ("pic",     "PIC / Phụ Trách\n担当者 (Inspector)",     185, "center"),
+            ("desc",    "Defect / Hiện Tượng Lỗi\n不良现象描述",   340, "center"),
+            ("cause",   "Cause / Nguyên Nhân\n原因分析",           300, "center"),
+            ("counter", "Action / Biện Pháp\n改善对策",            320, "center"),
+            ("sop",     "SOP / Tiêu Chuẩn\nSOP标准",               160, "center"),
+            ("prog",    "Progress / Tiến Độ\n进度状态",            160, "center"),
+            ("notes",   "Notes / Ghi Chú\n备注",                   220, "center")
         ]
 
         for col_id, col_name, col_w, anchor in headers_meta:
             self.tree.heading(col_id, text=col_name, anchor=anchor)
-            self.tree.column(col_id, width=col_w, anchor=anchor, minwidth=60)
+            self.tree.column(col_id, width=col_w, anchor=anchor, minwidth=max(60, col_w - 40), stretch=False)
 
         vsb = ttk.Scrollbar(tree_container, orient="vertical", command=self.tree.yview)
         hsb = ttk.Scrollbar(tree_container, orient="horizontal", command=self.tree.xview)
@@ -2478,8 +2492,8 @@ class AnomalyReportView(ctk.CTkFrame):
         style.configure("Anomaly.Treeview.Heading",
                         background=hdr_bg,
                         foreground=hdr_fg,
-                        font=("Segoe UI", 12, "bold"),
-                        padding=6)
+                        font=("Segoe UI", 11, "bold"),
+                        padding=[6, 8])
         style.map("Anomaly.Treeview",
                   background=[("selected", sel_bg)],
                   foreground=[("selected", sel_fg)])

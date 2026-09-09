@@ -62,8 +62,8 @@ def load_config() -> dict:
     # Default fallback
     return {
         "supabase_url": "https://tyeglupfonwvzcbpfcdh.supabase.co",
-        "anon_key": "",
-        "service_key": "",
+        "anon_key": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR5ZWdsdXBmb253dnpjYnBmY2RoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg5Mzg1NTIsImV4cCI6MjEwNDUxNDU1Mn0.-FlLs838LFzb_1LV_vB_PD53FeTmwv_a1cRbf1Qmffc",
+        "service_key": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR5ZWdsdXBmb253dnpjYnBmY2RoIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4ODkzODU1MiwiZXhwIjoyMTA0NTE0NTUyfQ.GPKv1fMdlGXbwLgmFHXHR2jA3r2gGFGDoXSlx412QvQ",
         "bucket_name": "anomaly-images",
         "admin_password_hash": "69623787a01183df78e22b529263bd30f7e1f6e7178fe59603e856b83a37f5e1"
     }
@@ -192,6 +192,33 @@ def upload_image(image_bytes: bytes, original_name: str = "defect.jpg") -> str:
 
     public_url = f"{supabase_url}/storage/v1/object/public/{bucket}/{remote_filename}"
     return public_url
+
+
+def download_image_bytes(image_url: str) -> bytes | None:
+    """
+    Downloads image bytes from the given URL (Supabase Storage, HTTP/HTTPS) or local file path.
+    Returns raw bytes on success, or None on failure.
+    """
+    if not image_url:
+        return None
+    try:
+        # Check if local file exists
+        if os.path.exists(image_url):
+            with open(image_url, "rb") as f:
+                return f.read()
+
+        # If it's a remote URL
+        if image_url.startswith("http://") or image_url.startswith("https://"):
+            req = urllib.request.Request(
+                image_url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) VIPQC-AI/2.2.7"}
+            )
+            with urllib.request.urlopen(req, timeout=15, context=get_ssl_context()) as resp:
+                if resp.status in (200, 201):
+                    return resp.read()
+    except Exception as e:
+        print(f"[AnomalyService] Download image warning ({image_url[:50]}...): {e}")
+    return None
 
 
 def delete_image_from_storage(image_url: str) -> bool:
