@@ -1,8 +1,8 @@
 {
-  "version": "2.2.2",
+  "version": "2.2.3",
   "release_date": "2026-09-09",
-  "title": "VIPQC AI v2.2.2 — Hoàn thiện luồng nạp và đặt lại BOM Series",
-  "changelog": "- Kéo thả PDF/Excel trực tiếp vào đúng tab So Sánh 2 BOM Series\n- Nút So Sánh chỉ khả dụng khi đã nạp đủ BOM Series A và B\n- Thêm nút Đặt lại để xóa cặp BOM, kết quả đối chiếu và trạng thái QC\n- Cải thiện thông báo khi hai ô Series đã đầy",
-  "download_url": "https://github.com/levanvung/VIPQC/raw/master/VIPQC%20AI.exe",
+  "title": "VIPQC AI v2.2.3 — Hiển thị điểm QC trên bản vẽ PCB",
+  "changelog": "- Tự mở bản vẽ PCB sau khi so sánh 2 BOM nếu có file PDF\n- Đánh dấu các vị trí Added, Removed/DNP và Modified trực tiếp trên bản vẽ\n- Click một dòng QC để spotlight vị trí tương ứng trên bản vẽ\n- Thêm chọn trang, zoom và chú giải màu cho cửa sổ kiểm tra bản vẽ",
+  "download_url": "https://github.com/levanvung/VIPQC/raw/master/VIPQC%20AI%20v2.2.3.exe",
   "release_url": "https://github.com/levanvung/VIPQC"
 }
