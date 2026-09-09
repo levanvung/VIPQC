@@ -192,7 +192,7 @@ class AnomalyImageStudioWindow(ctk.CTkToplevel):
     90-degree rotations, and complete marking/annotation tools (boxes, ovals, arrows, freehand, text).
     Allows saving the annotated image back to Supabase or downloading to local disk.
     """
-    def __init__(self, parent, report_data: dict, on_image_updated=None):
+    def __init__(self, parent, report_data: dict, initial_pil: Image.Image = None, on_image_updated=None):
         super().__init__(parent)
         self.report_data = report_data
         self.on_image_updated = on_image_updated
@@ -208,12 +208,13 @@ class AnomalyImageStudioWindow(ctk.CTkToplevel):
 
         # Image state
         self.raw_image_bytes = None
-        self.original_pil: Image.Image = None
+        self.original_pil: Image.Image = initial_pil
         self.rotation_angle = 0  # 0, 90, 180, 270
         self.zoom_level = 1.0
         self.pan_x = 0
         self.pan_y = 0
         self._tk_img = None
+        self._initial_fitted = False
 
         # Annotation state
         # Annotations are stored in (normalized or image-pixel) coordinates of the ROTATED image
@@ -227,7 +228,10 @@ class AnomalyImageStudioWindow(ctk.CTkToplevel):
         self.pen_current_points = []
 
         self._build_ui()
-        self._load_image_async()
+        if self.original_pil:
+            self.after(50, self._fit_to_screen)
+        else:
+            self._load_image_async()
 
     def _build_ui(self):
         # ── TOP TOOLBAR ──────────────────────────────────────────────────────
@@ -361,6 +365,7 @@ class AnomalyImageStudioWindow(ctk.CTkToplevel):
 
         self.canvas = tk.Canvas(self.canvas_frame, bg="#0B0F1A", highlightthickness=0, cursor="hand2")
         self.canvas.pack(fill="both", expand=True)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
 
         # Mouse & Gesture bindings
         self.canvas.bind("<ButtonPress-1>", self._on_canvas_press)
@@ -380,11 +385,31 @@ class AnomalyImageStudioWindow(ctk.CTkToplevel):
         self.bind("<r>", lambda e: self._rotate_90())
         self.bind("<R>", lambda e: self._rotate_90())
 
+    def _on_canvas_configure(self, event):
+        if not self._initial_fitted and self.original_pil:
+            if event.width > 50 and event.height > 50:
+                self._initial_fitted = True
+                self._fit_to_screen()
+
     # ── IMAGE LOADING ────────────────────────────────────────────────────────
     def _load_image_async(self):
         if not self.image_url:
-            messagebox.showwarning("Không có ảnh", "Báo cáo này chưa có hình ảnh đính kèm!")
+            self.canvas.delete("all")
+            self.canvas.create_text(
+                max(self.canvas.winfo_width() // 2, 300),
+                max(self.canvas.winfo_height() // 2, 250),
+                text="[Báo cáo này chưa có hình ảnh đính kèm]",
+                fill="#7A8BA6", font=("Segoe UI", 13)
+            )
             return
+
+        self.canvas.delete("all")
+        self.canvas.create_text(
+            max(self.canvas.winfo_width() // 2, 300),
+            max(self.canvas.winfo_height() // 2, 250),
+            text="⏳ Đang tải ảnh chất lượng cao từ Cloud...", fill="#00C9A7",
+            font=("Segoe UI", 15, "bold"), tags="loading_msg"
+        )
 
         def _fetch():
             try:
@@ -396,9 +421,19 @@ class AnomalyImageStudioWindow(ctk.CTkToplevel):
                 self.raw_image_bytes = raw
                 pil_img = Image.open(io.BytesIO(raw))
                 self.original_pil = pil_img
-                safe_after(self, 0, self._fit_to_screen)
+                def _done():
+                    self.canvas.delete("loading_msg")
+                    self._fit_to_screen()
+                safe_after(self, 0, _done)
             except Exception as e:
-                safe_after(self, 0, lambda: messagebox.showerror("Lỗi Tải Ảnh", f"Không thể tải ảnh từ Cloud:\n{e}"))
+                def _err():
+                    self.canvas.delete("all")
+                    self.canvas.create_text(
+                        max(self.canvas.winfo_width() // 2, 300),
+                        max(self.canvas.winfo_height() // 2, 250),
+                        text=f"❌ Không thể tải ảnh: {e}", fill="#EF4444", font=("Segoe UI", 12, "bold")
+                    )
+                safe_after(self, 0, _err)
 
         threading.Thread(target=_fetch, daemon=True).start()
 
@@ -418,8 +453,11 @@ class AnomalyImageStudioWindow(ctk.CTkToplevel):
         base = self._get_current_base_pil()
         if not base:
             return
-        cw = max(self.canvas.winfo_width(), 600)
-        ch = max(self.canvas.winfo_height(), 500)
+        cw = self.canvas.winfo_width()
+        ch = self.canvas.winfo_height()
+        if cw <= 50 or ch <= 50:
+            self.after(50, self._fit_to_screen)
+            return
         iw, ih = base.size
         scale = min((cw - 40) / iw, (ch - 40) / ih, 1.0)
         self.zoom_level = max(scale, 0.05)
@@ -529,7 +567,7 @@ class AnomalyImageStudioWindow(ctk.CTkToplevel):
         nh = max(10, int(ih * self.zoom_level))
 
         resized = base.resize((nw, nh), Image.Resampling.BILINEAR)
-        self._tk_img = ImageTk.PhotoImage(resized)
+        self._tk_img = ImageTk.PhotoImage(resized, master=self.canvas)
 
         self.canvas.delete("all")
         # Draw background image
@@ -819,211 +857,257 @@ class AnomalyImageStudioWindow(ctk.CTkToplevel):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DIALOG: CREATE / EDIT ANOMALY REPORT (18 COLUMNS)
+# DRAWER: CREATE / EDIT ANOMALY REPORT (SLIDE-IN PANEL WITH IMAGE PREVIEW)
 # ─────────────────────────────────────────────────────────────────────────────
-class AnomalyEditDialog(ctk.CTkToplevel):
-    def __init__(self, parent, report_data: dict = None, on_saved=None):
-        super().__init__(parent)
-        self.is_edit = report_data is not None
-        self.title("Chỉnh Sửa Báo Cáo Bất Thường" if self.is_edit else "Tạo Báo Cáo Bất Thường Mới")
-        self.geometry("920x740")
-        self.minsize(800, 620)
-        self.configure(fg_color=BG_DEEP)
-        self.transient(parent)
-        self.grab_set()
-
-        self.report_data = report_data or {}
+class AnomalyDrawerFrame(ctk.CTkFrame):
+    """
+    Slide-in Drawer panel on the right side of the main view for creating and editing reports.
+    Features rich form controls, auto-calculated defect rate, and a dedicated image preview card.
+    """
+    def __init__(self, parent, main_view, on_saved=None):
+        super().__init__(parent, fg_color=BG_CARD, corner_radius=12,
+                         border_width=1, border_color=BORDER_CLR, width=500)
+        self.parent = parent
+        self.main_view = main_view
         self.on_saved = on_saved
+
+        self.is_edit = False
+        self.report_data = {}
         self.selected_image_bytes = None
         self.selected_image_name = None
-        self._thumb_tk = None
+        self.current_pil_image: Image.Image = None
+        self._ctk_preview = None
 
         self._build_ui()
 
     def _build_ui(self):
-        header = ctk.CTkFrame(self, fg_color=BG_CARD, height=54, corner_radius=0)
-        header.pack(fill="x")
+        self.pack_propagate(False)
+
+        # ── DRAWER HEADER ──
+        header = ctk.CTkFrame(self, fg_color=BG_SURFACE, height=52, corner_radius=10)
+        header.pack(fill="x", padx=10, pady=(10, 6))
         header.pack_propagate(False)
 
-        title_text = "✏️ Chỉnh Sửa Báo Cáo Bất Thường" if self.is_edit else "➕ Tạo Báo Cáo Bất Thường Mới"
-        ctk.CTkLabel(header, text=title_text, font=FONT_H1, text_color=TEXT_PRIMARY).pack(side="left", padx=20)
+        self.lbl_title = ctk.CTkLabel(header, text="➕ Thêm Báo Cáo Mới", font=FONT_H1, text_color=TEXT_PRIMARY)
+        self.lbl_title.pack(side="left", padx=16)
 
-        scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
-        scroll.pack(fill="both", expand=True, padx=20, pady=12)
+        btn_close = ctk.CTkButton(header, text="✕", width=34, height=34, corner_radius=6,
+                                  fg_color="transparent", text_color=TEXT_MUTED, hover_color=BG_HOVER,
+                                  font=("Segoe UI", 13, "bold"), command=self.close_drawer)
+        btn_close.pack(side="right", padx=10)
 
-        col_left = ctk.CTkFrame(scroll, fg_color=BG_CARD, corner_radius=10, border_width=1, border_color=BORDER_CLR)
-        col_left.pack(side="left", fill="both", expand=True, padx=(0, 8), pady=4)
+        # ── SCROLLABLE BODY ──
+        self.body = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        self.body.pack(fill="both", expand=True, padx=10, pady=4)
 
-        col_right = ctk.CTkFrame(scroll, fg_color=BG_CARD, corner_radius=10, border_width=1, border_color=BORDER_CLR)
-        col_right.pack(side="right", fill="both", expand=True, padx=(8, 0), pady=4)
+        pad = {"padx": 14, "pady": (3, 3)}
 
-        pad = {"padx": 16, "pady": (4, 4)}
+        # --- SECTION 1: THÔNG TIN CHUNG & SỐ LƯỢNG ---
+        c1 = ctk.CTkFrame(self.body, fg_color=BG_DEEP, corner_radius=8, border_width=1, border_color=BORDER_CLR)
+        c1.pack(fill="x", pady=(0, 10))
 
-        # ── LEFT COLUMN ──
-        ctk.CTkLabel(col_left, text="📌 Thông Tin Chung & Số Lượng", font=FONT_H2, text_color=ACCENT_TEAL).pack(anchor="w", padx=16, pady=(12, 6))
+        ctk.CTkLabel(c1, text="📌 Thông Tin Kiểm Tra & Số Lượng", font=FONT_H2, text_color=ACCENT_TEAL).pack(anchor="w", padx=14, pady=(10, 4))
 
-        ctk.CTkLabel(col_left, text="Ngày Tháng (YYYY-MM-DD):", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
-        self.ent_date = ctk.CTkEntry(col_left, height=34, font=FONT_BODY)
+        ctk.CTkLabel(c1, text="Ngày Tháng (YYYY-MM-DD):", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
+        self.ent_date = ctk.CTkEntry(c1, height=34, font=FONT_BODY)
         self.ent_date.pack(fill="x", **pad)
-        self.ent_date.insert(0, str(self.report_data.get("report_date") or datetime.now().strftime("%Y-%m-%d")))
 
-        ctk.CTkLabel(col_left, text="Công Đoạn:", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
-        self.opt_process = ctk.CTkComboBox(col_left, values=["CHA", "SCP", "RAD", "CHP", "SMT", "Lắp Ráp", "KCS / Final QC", "Khác"],
-                                          height=34, font=FONT_BODY)
-        self.opt_process.pack(fill="x", **pad)
-        if self.report_data.get("process"):
-            self.opt_process.set(self.report_data.get("process"))
-
-        ctk.CTkLabel(col_left, text="Sản Phẩm (Model / PWB):", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
-        self.ent_product = ctk.CTkEntry(col_left, height=34, font=FONT_BODY)
-        self.ent_product.pack(fill="x", **pad)
-        self.ent_product.insert(0, str(self.report_data.get("product_name") or ""))
-
-        ctk.CTkLabel(col_left, text="Máy Móc / Chuyền / Thiết Bị:", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
-        self.ent_machine = ctk.CTkEntry(col_left, height=34, font=FONT_BODY)
-        self.ent_machine.pack(fill="x", **pad)
-        self.ent_machine.insert(0, str(self.report_data.get("machine") or ""))
-
-        # Quantities
-        q_frame = ctk.CTkFrame(col_left, fg_color="transparent")
-        q_frame.pack(fill="x", padx=16, pady=4)
-
-        f_tot = ctk.CTkFrame(q_frame, fg_color="transparent")
-        f_tot.pack(side="left", fill="x", expand=True, padx=(0, 4))
-        ctk.CTkLabel(f_tot, text="Số Lượng KT:", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w")
-        self.ent_total_qty = ctk.CTkEntry(f_tot, height=34, font=FONT_BODY)
-        self.ent_total_qty.pack(fill="x")
-        self.ent_total_qty.insert(0, str(self.report_data.get("total_qty", 0)))
-        self.ent_total_qty.bind("<KeyRelease>", self._calc_rate)
-
-        f_def = ctk.CTkFrame(q_frame, fg_color="transparent")
-        f_def.pack(side="left", fill="x", expand=True, padx=4)
-        ctk.CTkLabel(f_def, text="Số Lượng Lỗi:", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w")
-        self.ent_defect_qty = ctk.CTkEntry(f_def, height=34, font=FONT_BODY)
-        self.ent_defect_qty.pack(fill="x")
-        self.ent_defect_qty.insert(0, str(self.report_data.get("defect_qty", 0)))
-        self.ent_defect_qty.bind("<KeyRelease>", self._calc_rate)
-
-        f_rate = ctk.CTkFrame(q_frame, fg_color="transparent")
-        f_rate.pack(side="left", fill="x", expand=True, padx=(4, 0))
-        ctk.CTkLabel(f_rate, text="Tỷ Lệ Lỗi (%):", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w")
-        self.lbl_rate_val = ctk.CTkLabel(f_rate, text="0.00%", height=34, font=FONT_H2,
-                                         fg_color=BG_SURFACE, corner_radius=6, text_color=ACCENT_AMBER)
-        self.lbl_rate_val.pack(fill="x")
-
-        ctk.CTkLabel(col_left, text="Người Chịu Trách Nhiệm (Manager/Leader):", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
-        self.ent_resp = ctk.CTkEntry(col_left, height=34, font=FONT_BODY)
-        self.ent_resp.pack(fill="x", **pad)
-        self.ent_resp.insert(0, str(self.report_data.get("responsible_person") or ""))
-
-        ctk.CTkLabel(col_left, text="Người Phụ Trách (Inspector/PIC):", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
-        self.ent_pic = ctk.CTkEntry(col_left, height=34, font=FONT_BODY)
-        self.ent_pic.pack(fill="x", **pad)
-        self.ent_pic.insert(0, str(self.report_data.get("pic") or ""))
-
-        ctk.CTkLabel(col_left, text="Tiến Độ:", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
-        self.opt_progress = ctk.CTkOptionMenu(col_left, values=["Chưa thực hiện", "Đang thực hiện", "Đã hoàn thành"],
+        ctk.CTkLabel(c1, text="Công Đoạn:", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
+        self.opt_process = ctk.CTkOptionMenu(c1, values=["CHA", "SCP", "RAD", "CHP", "SMT", "Lắp Ráp", "KCS / Final QC", "Khác"],
                                              height=34, font=FONT_BODY)
-        self.opt_progress.pack(fill="x", padx=16, pady=(4, 16))
-        if self.report_data.get("progress"):
-            self.opt_progress.set(self.report_data.get("progress"))
-        else:
-            self.opt_progress.set("Đang thực hiện")
+        self.opt_process.pack(fill="x", **pad)
 
-        # ── RIGHT COLUMN ──
-        ctk.CTkLabel(col_right, text="📝 Phân Tích & Biện Pháp Khắc Phục", font=FONT_H2, text_color=ACCENT_TEAL).pack(anchor="w", padx=16, pady=(12, 6))
+        ctk.CTkLabel(c1, text="Sản Phẩm (Model / PWB): *", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
+        self.ent_product = ctk.CTkEntry(c1, height=34, font=FONT_BODY, placeholder_text="Nhập tên model hoặc mã PWB...")
+        self.ent_product.pack(fill="x", **pad)
 
-        ctk.CTkLabel(col_right, text="Mô Tả Lỗi (Hiện tượng bất thường):", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
-        self.txt_desc = ctk.CTkTextbox(col_right, height=65, font=FONT_BODY)
-        self.txt_desc.pack(fill="x", **pad)
-        self.txt_desc.insert("1.0", str(self.report_data.get("description") or ""))
+        ctk.CTkLabel(c1, text="Máy Móc / Chuyền / Thiết Bị:", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
+        self.ent_machine = ctk.CTkEntry(c1, height=34, font=FONT_BODY, placeholder_text="Ví dụ: Line 2, Máy 12...")
+        self.ent_machine.pack(fill="x", **pad)
 
-        ctk.CTkLabel(col_right, text="Nguyên Nhân:", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
-        self.txt_cause = ctk.CTkTextbox(col_right, height=65, font=FONT_BODY)
-        self.txt_cause.pack(fill="x", **pad)
-        self.txt_cause.insert("1.0", str(self.report_data.get("root_cause") or ""))
+        # Quantities row
+        q_row = ctk.CTkFrame(c1, fg_color="transparent")
+        q_row.pack(fill="x", padx=14, pady=4)
 
-        ctk.CTkLabel(col_right, text="Các Biện Pháp Cải Tiến:", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
-        self.txt_counter = ctk.CTkTextbox(col_right, height=65, font=FONT_BODY)
-        self.txt_counter.pack(fill="x", **pad)
-        self.txt_counter.insert("1.0", str(self.report_data.get("countermeasures") or ""))
+        f1 = ctk.CTkFrame(q_row, fg_color="transparent")
+        f1.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        ctk.CTkLabel(f1, text="SL Kiểm:", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w")
+        self.ent_tot = ctk.CTkEntry(f1, height=34, font=FONT_BODY)
+        self.ent_tot.pack(fill="x")
+        self.ent_tot.bind("<KeyRelease>", self._calc_rate)
 
-        ctk.CTkLabel(col_right, text="Tiêu Chuẩn Hóa SOP:", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
-        self.ent_sop = ctk.CTkEntry(col_right, height=34, font=FONT_BODY)
-        self.ent_sop.pack(fill="x", **pad)
-        self.ent_sop.insert(0, str(self.report_data.get("sop_standard") or ""))
+        f2 = ctk.CTkFrame(q_row, fg_color="transparent")
+        f2.pack(side="left", fill="x", expand=True, padx=4)
+        ctk.CTkLabel(f2, text="SL Lỗi:", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w")
+        self.ent_def = ctk.CTkEntry(f2, height=34, font=FONT_BODY)
+        self.ent_def.pack(fill="x")
+        self.ent_def.bind("<KeyRelease>", self._calc_rate)
 
-        ctk.CTkLabel(col_right, text="Ghi Chú:", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
-        self.ent_notes = ctk.CTkEntry(col_right, height=34, font=FONT_BODY)
-        self.ent_notes.pack(fill="x", **pad)
-        self.ent_notes.insert(0, str(self.report_data.get("notes") or ""))
+        f3 = ctk.CTkFrame(q_row, fg_color="transparent")
+        f3.pack(side="left", fill="x", expand=True, padx=(4, 0))
+        ctk.CTkLabel(f3, text="Tỷ Lệ Lỗi:", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w")
+        self.lbl_rate = ctk.CTkLabel(f3, text="0.00%", height=34, font=FONT_H2,
+                                     fg_color=BG_SURFACE, corner_radius=6, text_color=ACCENT_AMBER)
+        self.lbl_rate.pack(fill="x")
 
-        # Image section
-        ctk.CTkLabel(col_right, text="🖼️ Hình Ảnh Lỗi (Chọn file hoặc chụp màn hình rồi Ctrl+V):",
-                     font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", padx=16, pady=(6, 2))
+        ctk.CTkLabel(c1, text="Người Chịu Trách Nhiệm (Manager/Leader):", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
+        self.ent_resp = ctk.CTkEntry(c1, height=34, font=FONT_BODY)
+        self.ent_resp.pack(fill="x", **pad)
 
-        img_box = ctk.CTkFrame(col_right, fg_color=BG_SURFACE, corner_radius=8, height=110)
-        img_box.pack(fill="x", padx=16, pady=(2, 16))
-        img_box.pack_propagate(False)
+        ctk.CTkLabel(c1, text="Người Phụ Trách (Inspector/PIC):", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
+        self.ent_pic = ctk.CTkEntry(c1, height=34, font=FONT_BODY)
+        self.ent_pic.pack(fill="x", **pad)
 
-        self.lbl_img_preview = ctk.CTkLabel(img_box, text="[Chưa có ảnh]\nNhấn nút bên cạnh hoặc Ctrl+V",
+        ctk.CTkLabel(c1, text="Tiến Độ Khắc Phục:", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
+        self.opt_prog = ctk.CTkOptionMenu(c1, values=["Chưa thực hiện", "Đang thực hiện", "Đã hoàn thành"],
+                                          height=34, font=FONT_BODY)
+        self.opt_prog.pack(fill="x", padx=14, pady=(3, 12))
+
+        # --- SECTION 2: HÌNH ẢNH MINH HỌA & ĐÁNH DẤU LỖI ---
+        c2 = ctk.CTkFrame(self.body, fg_color=BG_DEEP, corner_radius=8, border_width=1, border_color=BORDER_CLR)
+        c2.pack(fill="x", pady=(0, 10))
+
+        ctk.CTkLabel(c2, text="🖼️ Hình Ảnh Minh Họa & Đánh Dấu", font=FONT_H2, text_color=ACCENT_TEAL).pack(anchor="w", padx=14, pady=(10, 4))
+
+        # Image preview box
+        self.box_img = ctk.CTkFrame(c2, fg_color=BG_SURFACE, corner_radius=8, height=190)
+        self.box_img.pack(fill="x", padx=14, pady=(4, 6))
+        self.box_img.pack_propagate(False)
+
+        self.lbl_img_preview = ctk.CTkLabel(self.box_img, text="[Chưa có ảnh]\nBấm 'Chọn File' hoặc chụp màn hình rồi dán (Ctrl+V)",
                                             font=FONT_SMALL, text_color=TEXT_MUTED)
-        self.lbl_img_preview.pack(side="left", padx=12, fill="both", expand=True)
+        self.lbl_img_preview.pack(fill="both", expand=True, padx=8, pady=8)
 
-        btn_img_row = ctk.CTkFrame(img_box, fg_color="transparent")
-        btn_img_row.pack(side="right", padx=10, pady=8)
+        # Image control buttons
+        btn_img_bar = ctk.CTkFrame(c2, fg_color="transparent")
+        btn_img_bar.pack(fill="x", padx=14, pady=(2, 10))
 
-        ctk.CTkButton(btn_img_row, text="📁 Chọn Ảnh", width=100, height=32, font=FONT_SMALL,
-                      command=self._pick_image).pack(pady=3)
-        ctk.CTkButton(btn_img_row, text="📋 Dán (Ctrl+V)", width=100, height=32, font=FONT_SMALL,
-                      command=self._paste_image).pack(pady=3)
-        self.btn_clear_img = ctk.CTkButton(btn_img_row, text="✕ Xóa ảnh", width=100, height=28,
-                                           font=FONT_SMALL, fg_color=BG_CARD, text_color=ACCENT_RED,
+        self.btn_studio = ctk.CTkButton(btn_img_bar, text="🔍 Soi & Đánh Dấu (Studio)", height=32, corner_radius=6,
+                                        font=FONT_SMALL, fg_color=ACCENT_BLUE, text_color="#FFFFFF",
+                                        command=self._open_studio, state="disabled")
+        self.btn_studio.pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+        ctk.CTkButton(btn_img_bar, text="📁 Chọn", width=68, height=32, corner_radius=6,
+                      font=FONT_SMALL, fg_color=BG_SURFACE, text_color=TEXT_PRIMARY, hover_color=BG_HOVER,
+                      command=self._pick_image).pack(side="left", padx=2)
+
+        ctk.CTkButton(btn_img_bar, text="📋 Dán", width=65, height=32, corner_radius=6,
+                      font=FONT_SMALL, fg_color=BG_SURFACE, text_color=TEXT_PRIMARY, hover_color=BG_HOVER,
+                      command=self._paste_image).pack(side="left", padx=2)
+
+        self.btn_clear_img = ctk.CTkButton(btn_img_bar, text="✕", width=36, height=32, corner_radius=6,
+                                           font=FONT_SMALL, fg_color=BG_SURFACE, text_color=ACCENT_RED, hover_color=BG_HOVER,
                                            command=self._clear_image)
-        self.btn_clear_img.pack(pady=3)
+        self.btn_clear_img.pack(side="left", padx=(2, 0))
 
-        self.bind("<Control-v>", lambda e: self._paste_image())
-        self.bind("<Control-V>", lambda e: self._paste_image())
+        # --- SECTION 3: MÔ TẢ & ĐỐI SÁCH KHẮC PHỤC ---
+        c3 = ctk.CTkFrame(self.body, fg_color=BG_DEEP, corner_radius=8, border_width=1, border_color=BORDER_CLR)
+        c3.pack(fill="x", pady=(0, 10))
 
-        if self.report_data.get("image_url"):
-            self._load_remote_thumb(self.report_data.get("image_url"))
+        ctk.CTkLabel(c3, text="📝 Mô Tả Hiện Tượng & Đối Sách", font=FONT_H2, text_color=ACCENT_TEAL).pack(anchor="w", padx=14, pady=(10, 4))
 
-        self._calc_rate()
+        ctk.CTkLabel(c3, text="Mô Tả Lỗi (Hiện tượng bất thường):", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
+        self.txt_desc = ctk.CTkTextbox(c3, height=65, font=FONT_BODY)
+        self.txt_desc.pack(fill="x", **pad)
 
-        # Bottom Bar
-        bottom = ctk.CTkFrame(self, fg_color=BG_CARD, height=54, corner_radius=0)
-        bottom.pack(fill="x", side="bottom")
-        bottom.pack_propagate(False)
+        ctk.CTkLabel(c3, text="Nguyên Nhân:", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
+        self.txt_cause = ctk.CTkTextbox(c3, height=65, font=FONT_BODY)
+        self.txt_cause.pack(fill="x", **pad)
 
-        self.lbl_saving = ctk.CTkLabel(bottom, text="", font=FONT_SMALL, text_color=ACCENT_TEAL)
-        self.lbl_saving.pack(side="left", padx=20)
+        ctk.CTkLabel(c3, text="Biện Pháp Cải Tiến:", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
+        self.txt_counter = ctk.CTkTextbox(c3, height=65, font=FONT_BODY)
+        self.txt_counter.pack(fill="x", **pad)
 
-        ctk.CTkButton(bottom, text="Hủy", width=100, height=36, corner_radius=8,
-                      fg_color=BG_SURFACE, text_color=TEXT_PRIMARY, hover_color=BG_HOVER,
-                      command=self.destroy).pack(side="right", padx=(4, 20))
+        ctk.CTkLabel(c3, text="Tiêu Chuẩn Hóa SOP:", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
+        self.ent_sop = ctk.CTkEntry(c3, height=34, font=FONT_BODY)
+        self.ent_sop.pack(fill="x", **pad)
 
-        self.btn_save = ctk.CTkButton(bottom, text="💾 Lưu Báo Cáo", width=150, height=36, corner_radius=8,
+        ctk.CTkLabel(c3, text="Ghi Chú:", font=FONT_SMALL, text_color=TEXT_MUTED).pack(anchor="w", **pad)
+        self.ent_notes = ctk.CTkEntry(c3, height=34, font=FONT_BODY)
+        self.ent_notes.pack(fill="x", padx=14, pady=(3, 12))
+
+        # ── DRAWER FOOTER ──
+        footer = ctk.CTkFrame(self, fg_color=BG_SURFACE, height=54, corner_radius=10)
+        footer.pack(fill="x", side="bottom", padx=10, pady=(4, 10))
+        footer.pack_propagate(False)
+
+        self.lbl_saving = ctk.CTkLabel(footer, text="", font=FONT_SMALL, text_color=ACCENT_TEAL)
+        self.lbl_saving.pack(side="left", padx=12)
+
+        ctk.CTkButton(footer, text="Đóng", width=80, height=36, corner_radius=8,
+                      fg_color=BG_CARD, text_color=TEXT_PRIMARY, hover_color=BG_HOVER,
+                      command=self.close_drawer).pack(side="right", padx=(4, 10))
+
+        self.btn_save = ctk.CTkButton(footer, text="💾 Lưu Báo Cáo", width=140, height=36, corner_radius=8,
                                       fg_color=ACCENT_TEAL, text_color=("#FFFFFF", "#0B0F1A"),
-                                      font=FONT_H2, command=self._save)
-        self.btn_save.pack(side="right", padx=6)
+                                      font=FONT_H2, command=self._save_report)
+        self.btn_save.pack(side="right", padx=4)
 
+    # ── LOGIC METHODS ──
     def _calc_rate(self, event=None):
         try:
-            tot = float(self.ent_total_qty.get().strip() or 0)
-            def_q = float(self.ent_defect_qty.get().strip() or 0)
+            tot = float(self.ent_tot.get().strip() or 0)
+            def_q = float(self.ent_def.get().strip() or 0)
             if tot > 0:
                 rate = (def_q / tot) * 100.0
-                self.lbl_rate_val.configure(text=f"{rate:.2f}%")
+                self.lbl_rate.configure(text=f"{rate:.2f}%")
                 if rate > 5.0:
-                    self.lbl_rate_val.configure(text_color=ACCENT_RED)
+                    self.lbl_rate.configure(text_color=ACCENT_RED)
                 elif rate > 1.0:
-                    self.lbl_rate_val.configure(text_color=ACCENT_AMBER)
+                    self.lbl_rate.configure(text_color=ACCENT_AMBER)
                 else:
-                    self.lbl_rate_val.configure(text_color=ACCENT_TEAL)
+                    self.lbl_rate.configure(text_color=ACCENT_TEAL)
             else:
-                self.lbl_rate_val.configure(text="0.00%", text_color=TEXT_MUTED)
+                self.lbl_rate.configure(text="0.00%", text_color=TEXT_MUTED)
         except Exception:
-            self.lbl_rate_val.configure(text="0.00%", text_color=TEXT_MUTED)
+            self.lbl_rate.configure(text="0.00%", text_color=TEXT_MUTED)
+
+    def _show_thumb_from_pil(self, pil_img: Image.Image):
+        try:
+            thumb = pil_img.copy()
+            thumb.thumbnail((320, 180), Image.Resampling.LANCZOS)
+            tw, th = thumb.size
+            self._ctk_preview = ctk.CTkImage(light_image=thumb, dark_image=thumb, size=(tw, th))
+            self.lbl_img_preview.configure(image=self._ctk_preview, text="")
+            self.btn_studio.configure(state="normal")
+        except Exception as e:
+            self.lbl_img_preview.configure(text=f"[Lỗi ảnh: {e}]", image=None)
+
+    def _show_thumb_from_bytes(self, b: bytes):
+        try:
+            im = Image.open(io.BytesIO(b))
+            self.current_pil_image = im
+            self._show_thumb_from_pil(im)
+        except Exception as e:
+            self.lbl_img_preview.configure(text=f"[Ảnh đã chọn: {len(b)} bytes]", image=None)
+
+    def _load_remote_thumb(self, url: str):
+        self.lbl_img_preview.configure(text="⏳ Đang tải ảnh...", image=None)
+        self.btn_studio.configure(state="disabled")
+
+        def _fetch():
+            try:
+                import urllib.request
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                ssl_ctx = svc.get_ssl_context()
+                with urllib.request.urlopen(req, timeout=15, context=ssl_ctx) as r:
+                    raw = r.read()
+                im = Image.open(io.BytesIO(raw))
+                self.current_pil_image = im
+                safe_after(self, 0, lambda: self._show_thumb_from_pil(im))
+            except Exception as e:
+                safe_after(self, 0, lambda: self.lbl_img_preview.configure(text=f"[Không tải được ảnh: {e}]", image=None))
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _clear_image(self):
+        self.selected_image_bytes = None
+        self.selected_image_name = None
+        self.current_pil_image = None
+        self.report_data["image_url"] = None
+        self._ctk_preview = None
+        self.lbl_img_preview.configure(image=None, text="[Chưa có ảnh]\nBấm 'Chọn File' hoặc chụp màn hình rồi dán (Ctrl+V)")
+        self.btn_studio.configure(state="disabled")
 
     def _pick_image(self):
         f = filedialog.askopenfilename(
@@ -1061,50 +1145,117 @@ class AnomalyEditDialog(ctk.CTkToplevel):
         except Exception as e:
             messagebox.showwarning("Lỗi Clipboard", f"Không thể dán ảnh:\n{e}")
 
-    def _show_thumb_from_bytes(self, b: bytes):
-        try:
-            im = Image.open(io.BytesIO(b))
-            im.thumbnail((140, 95))
-            self._thumb_tk = ImageTk.PhotoImage(im)
-            self.lbl_img_preview.configure(image=self._thumb_tk, text="")
-        except Exception:
-            self.lbl_img_preview.configure(text="[Ảnh đã chọn]")
+    def _open_studio(self):
+        if not self.current_pil_image and not self.report_data.get("image_url"):
+            messagebox.showwarning("Chưa có ảnh", "Vui lòng chọn hoặc dán ảnh trước khi mở Studio!")
+            return
 
-    def _load_remote_thumb(self, url: str):
-        def _fetch():
-            try:
-                import urllib.request
-                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                ssl_ctx = svc.get_ssl_context()
-                with urllib.request.urlopen(req, timeout=10, context=ssl_ctx) as r:
-                    raw = r.read()
-                im = Image.open(io.BytesIO(raw))
-                im.thumbnail((140, 95))
-                self._thumb_tk = ImageTk.PhotoImage(im)
-                self.after(0, lambda: self.lbl_img_preview.configure(image=self._thumb_tk, text=""))
-            except Exception:
-                self.after(0, lambda: self.lbl_img_preview.configure(text="[Ảnh trên Cloud]"))
+        def _on_updated(updated_rep):
+            if isinstance(updated_rep, dict) and updated_rep.get("image_url"):
+                self.report_data["image_url"] = updated_rep.get("image_url")
+                self._load_remote_thumb(updated_rep.get("image_url"))
+            if self.main_view:
+                self.main_view.refresh_data()
 
-        threading.Thread(target=_fetch, daemon=True).start()
+        AnomalyImageStudioWindow(self.main_view, self.report_data, initial_pil=self.current_pil_image, on_image_updated=_on_updated)
 
-    def _clear_image(self):
+    def open_for_create(self):
+        self.is_edit = False
+        self.report_data = {}
+        self.lbl_title.configure(text="➕ Thêm Báo Cáo Mới")
+        self.lbl_saving.configure(text="")
+        self.btn_save.configure(state="normal")
+
+        self.ent_date.delete(0, "end")
+        self.ent_date.insert(0, datetime.now().strftime("%Y-%m-%d"))
+        self.opt_process.set("CHA")
+        self.ent_product.delete(0, "end")
+        self.ent_machine.delete(0, "end")
+        self.ent_tot.delete(0, "end")
+        self.ent_tot.insert(0, "0")
+        self.ent_def.delete(0, "end")
+        self.ent_def.insert(0, "0")
+        self._calc_rate()
+        self.ent_resp.delete(0, "end")
+        self.ent_pic.delete(0, "end")
+        self.opt_prog.set("Đang thực hiện")
+        self.txt_desc.delete("1.0", "end")
+        self.txt_cause.delete("1.0", "end")
+        self.txt_counter.delete("1.0", "end")
+        self.ent_sop.delete(0, "end")
+        self.ent_notes.delete(0, "end")
+        self._clear_image()
+
+        self.pack(side="right", fill="y", padx=(10, 0))
+        self.ent_product.focus()
+
+    def open_for_edit(self, report_data: dict):
+        self.is_edit = True
+        self.report_data = dict(report_data)
+        rep_id = report_data.get("id", "")
+        self.lbl_title.configure(text=f"✏️ Sửa Báo Cáo #{rep_id}")
+        self.lbl_saving.configure(text="")
+        self.btn_save.configure(state="normal")
+
+        self.ent_date.delete(0, "end")
+        self.ent_date.insert(0, str(report_data.get("report_date") or datetime.now().strftime("%Y-%m-%d")))
+        if report_data.get("process"):
+            self.opt_process.set(report_data.get("process"))
+        self.ent_product.delete(0, "end")
+        self.ent_product.insert(0, str(report_data.get("product_name") or ""))
+        self.ent_machine.delete(0, "end")
+        self.ent_machine.insert(0, str(report_data.get("machine") or ""))
+        self.ent_tot.delete(0, "end")
+        self.ent_tot.insert(0, str(report_data.get("total_qty", 0)))
+        self.ent_def.delete(0, "end")
+        self.ent_def.insert(0, str(report_data.get("defect_qty", 0)))
+        self._calc_rate()
+        self.ent_resp.delete(0, "end")
+        self.ent_resp.insert(0, str(report_data.get("responsible_person") or ""))
+        self.ent_pic.delete(0, "end")
+        self.ent_pic.insert(0, str(report_data.get("pic") or ""))
+        if report_data.get("progress"):
+            self.opt_prog.set(report_data.get("progress"))
+        else:
+            self.opt_prog.set("Đang thực hiện")
+        self.txt_desc.delete("1.0", "end")
+        self.txt_desc.insert("1.0", str(report_data.get("description") or ""))
+        self.txt_cause.delete("1.0", "end")
+        self.txt_cause.insert("1.0", str(report_data.get("root_cause") or ""))
+        self.txt_counter.delete("1.0", "end")
+        self.txt_counter.insert("1.0", str(report_data.get("countermeasures") or ""))
+        self.ent_sop.delete(0, "end")
+        self.ent_sop.insert(0, str(report_data.get("sop_standard") or ""))
+        self.ent_notes.delete(0, "end")
+        self.ent_notes.insert(0, str(report_data.get("notes") or ""))
+
         self.selected_image_bytes = None
         self.selected_image_name = None
-        self.report_data["image_url"] = None
-        self.lbl_img_preview.configure(image="", text="[Đã xóa ảnh]")
+        self.current_pil_image = None
+        img_url = report_data.get("image_url")
+        if img_url:
+            self._load_remote_thumb(img_url)
+        else:
+            self._clear_image()
 
-    def _save(self):
+        self.pack(side="right", fill="y", padx=(10, 0))
+        self.ent_product.focus()
+
+    def close_drawer(self):
+        self.pack_forget()
+
+    def _save_report(self):
         prod = self.ent_product.get().strip()
         if not prod:
-            messagebox.showwarning("Thiếu thông tin", "Vui lòng nhập Tên Sản Phẩm!")
+            messagebox.showwarning("Thiếu thông tin", "Vui lòng nhập Tên Sản Phẩm (Model/PWB)!", parent=self)
             self.ent_product.focus()
             return
 
         try:
-            tot_q = int(self.ent_total_qty.get().strip() or 0)
-            def_q = int(self.ent_defect_qty.get().strip() or 0)
+            tot_q = int(self.ent_tot.get().strip() or 0)
+            def_q = int(self.ent_def.get().strip() or 0)
         except ValueError:
-            messagebox.showwarning("Lỗi số lượng", "Số lượng kiểm tra và số lượng lỗi phải là số nguyên!")
+            messagebox.showwarning("Lỗi số lượng", "Số lượng kiểm tra và số lượng lỗi phải là số nguyên!", parent=self)
             return
 
         payload = {
@@ -1116,14 +1267,14 @@ class AnomalyEditDialog(ctk.CTkToplevel):
             "defect_qty": def_q,
             "responsible_person": self.ent_resp.get().strip(),
             "pic": self.ent_pic.get().strip(),
-            "progress": self.opt_progress.get().strip(),
+            "progress": self.opt_prog.get().strip(),
             "description": self.txt_desc.get("1.0", "end-1c").strip(),
             "root_cause": self.txt_cause.get("1.0", "end-1c").strip(),
             "countermeasures": self.txt_counter.get("1.0", "end-1c").strip(),
             "sop_standard": self.ent_sop.get().strip(),
             "notes": self.ent_notes.get().strip(),
         }
-        if "image_url" in self.report_data:
+        if "image_url" in self.report_data and self.report_data["image_url"] is not None:
             payload["image_url"] = self.report_data["image_url"]
 
         self.btn_save.configure(state="disabled")
@@ -1152,14 +1303,16 @@ class AnomalyEditDialog(ctk.CTkToplevel):
         threading.Thread(target=_do_save, daemon=True).start()
 
     def _on_save_success(self, res):
-        self.destroy()
+        self.btn_save.configure(state="normal")
+        self.lbl_saving.configure(text="")
+        self.close_drawer()
         if self.on_saved:
             self.on_saved(res)
 
     def _on_save_error(self, err_msg):
         self.btn_save.configure(state="normal")
         self.lbl_saving.configure(text="")
-        messagebox.showerror("Lỗi Lưu Dữ Liệu", f"Không thể lưu lên Supabase:\n{err_msg}")
+        messagebox.showerror("Lỗi Lưu Dữ Liệu", f"Không thể lưu lên Supabase:\n{err_msg}", parent=self)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1263,13 +1416,19 @@ class AnomalyReportView(ctk.CTkFrame):
         )
         self.btn_add.pack(side="right", padx=4)
 
-        # ── FULL-WIDTH TABLE CONTAINER (NO SIDEBAR) ──────────────────────────
-        tbl_card = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=12,
-                                border_width=1, border_color=BORDER_CLR)
-        tbl_card.pack(fill="both", expand=True)
+        # ── MAIN CONTENT AREA (TABLE ON LEFT, DRAWER ON RIGHT) ──────────────
+        self.content_area = ctk.CTkFrame(self, fg_color="transparent")
+        self.content_area.pack(fill="both", expand=True)
+
+        self.tbl_card = ctk.CTkFrame(self.content_area, fg_color=BG_CARD, corner_radius=12,
+                                     border_width=1, border_color=BORDER_CLR)
+        self.tbl_card.pack(side="left", fill="both", expand=True)
+
+        # Drawer on right (docked, hidden until opened)
+        self.drawer = AnomalyDrawerFrame(self.content_area, self, on_saved=self._on_drawer_saved)
 
         # Table Header Info Bar
-        tbl_info = ctk.CTkFrame(tbl_card, fg_color="transparent", height=34)
+        tbl_info = ctk.CTkFrame(self.tbl_card, fg_color="transparent", height=34)
         tbl_info.pack(fill="x", padx=16, pady=(10, 4))
 
         self.lbl_tbl_count = ctk.CTkLabel(tbl_info, text="Danh Sách Báo Cáo: 0 bản ghi",
@@ -1277,13 +1436,16 @@ class AnomalyReportView(ctk.CTkFrame):
         self.lbl_tbl_count.pack(side="left")
 
         lbl_hint = ctk.CTkLabel(tbl_info,
-                                text="💡 Click chọn dòng để Sửa/Xóa. Click đúp vào dòng để Soi ảnh & Đánh dấu (Marking).",
+                                text="💡 Click đúp vào dòng để Sửa trong Drawer. Click 'Ảnh Lỗi' để Soi & Vẽ ảnh (Studio).",
                                 font=FONT_SMALL, text_color=TEXT_MUTED)
         lbl_hint.pack(side="right")
 
         # Treeview with all 17 columns
-        tree_container = tk.Frame(tbl_card, bg="#131929")
+        tree_container = tk.Frame(self.tbl_card, bg="#131929")
         tree_container.pack(fill="both", expand=True, padx=12, pady=(4, 12))
+
+        tree_container.grid_rowconfigure(0, weight=1)
+        tree_container.grid_columnconfigure(0, weight=1)
 
         cols = (
             "stt", "date", "process", "product", "machine", "tot", "def", "rate",
@@ -1293,36 +1455,36 @@ class AnomalyReportView(ctk.CTkFrame):
                                  style="Anomaly.Treeview", selectmode="browse")
 
         headers_meta = [
-            ("stt", "STT", 46, "center"),
-            ("date", "Ngày Tháng", 95, "center"),
-            ("process", "Công Đoạn", 90, "center"),
-            ("product", "Sản Phẩm", 140, "w"),
-            ("machine", "Máy Móc", 90, "center"),
-            ("tot", "SL Kiểm", 75, "e"),
-            ("def", "SL Lỗi", 70, "e"),
-            ("rate", "Tỷ Lệ (%)", 85, "e"),
-            ("resp", "Người Chịu TN", 130, "w"),
-            ("pic", "Người Phụ Trách", 125, "w"),
-            ("img", "Ảnh Lỗi", 110, "center"),
-            ("desc", "Mô Tả Hiện Tượng Lỗi", 230, "w"),
-            ("cause", "Nguyên Nhân", 210, "w"),
-            ("counter", "Biện Pháp Cải Tiến", 230, "w"),
-            ("sop", "Tiêu Chuẩn SOP", 115, "center"),
-            ("prog", "Tiến Độ", 115, "center"),
-            ("notes", "Ghi Chú", 160, "w")
+            ("stt", "STT", 50, "center"),
+            ("date", "Ngày Tháng", 105, "center"),
+            ("process", "Công Đoạn", 95, "center"),
+            ("product", "Sản Phẩm (Model/PWB)", 160, "w"),
+            ("machine", "Máy Móc / Line", 110, "center"),
+            ("tot", "SL Kiểm", 85, "e"),
+            ("def", "SL Lỗi", 80, "e"),
+            ("rate", "Tỷ Lệ (%)", 90, "e"),
+            ("resp", "Người Chịu TN", 140, "w"),
+            ("pic", "Người Phụ Trách", 130, "w"),
+            ("img", "Ảnh Lỗi", 115, "center"),
+            ("desc", "Mô Tả Hiện Tượng Lỗi", 280, "w"),
+            ("cause", "Nguyên Nhân", 250, "w"),
+            ("counter", "Biện Pháp Cải Tiến", 280, "w"),
+            ("sop", "Tiêu Chuẩn SOP", 125, "center"),
+            ("prog", "Tiến Độ", 125, "center"),
+            ("notes", "Ghi Chú", 180, "w")
         ]
 
         for col_id, col_name, col_w, col_align in headers_meta:
             self.tree.heading(col_id, text=col_name)
-            self.tree.column(col_id, width=col_w, anchor=col_align, minwidth=40)
+            self.tree.column(col_id, width=col_w, anchor=col_align, minwidth=50)
 
         vsb = ttk.Scrollbar(tree_container, orient="vertical", command=self.tree.yview)
         hsb = ttk.Scrollbar(tree_container, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
 
-        self.tree.pack(side="left", fill="both", expand=True)
-        vsb.pack(side="right", fill="y")
-        hsb.pack(side="bottom", fill="x")
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
 
         # Treeview Interactions
         self.tree.bind("<<TreeviewSelect>>", self._on_row_select)
@@ -1442,16 +1604,13 @@ class AnomalyReportView(ctk.CTkFrame):
             self._update_action_buttons_state()
 
     def _on_row_double_click(self, event):
-        """Double clicking a row opens Marking Studio if image exists, else edit dialog."""
+        """Double clicking a row opens the Drawer to edit the report."""
         if not self.selected_report:
             return
-        if self.selected_report.get("image_url"):
-            self._open_marking_studio()
-        else:
-            self._on_edit_report()
+        self._on_edit_report()
 
     def _on_tree_cell_click(self, event):
-        """Clicking directly on the 'Ảnh Lỗi' column cell immediately opens the Marking Studio."""
+        """Clicking directly on the 'Ảnh Lỗi' column cell opens the Image Studio, or prompts to add image in Drawer."""
         region = self.tree.identify_region(event.x, event.y)
         if region == "cell":
             col_id = self.tree.identify_column(event.x)
@@ -1464,7 +1623,7 @@ class AnomalyReportView(ctk.CTkFrame):
                     if found[0].get("image_url"):
                         self.after(50, self._open_marking_studio)
                     else:
-                        if messagebox.askyesno("Chưa có ảnh", "Báo cáo này chưa có hình ảnh đính kèm.\nBạn có muốn mở để thêm ảnh không?"):
+                        if messagebox.askyesno("Chưa có ảnh", "Báo cáo này chưa có hình ảnh đính kèm.\nBạn có muốn mở Drawer để thêm ảnh không?"):
                             self._on_edit_report()
 
     def _update_action_buttons_state(self):
@@ -1537,23 +1696,18 @@ class AnomalyReportView(ctk.CTkFrame):
 
     # ── CRUD ACTIONS ─────────────────────────────────────────────────────────
     def _on_add_report(self):
-        self._require_admin(lambda: AnomalyEditDialog(self, on_saved=self._on_report_created))
-
-    def _on_report_created(self, new_rep):
-        self.refresh_data()
-        if hasattr(self.app, "show_toast"):
-            self.app.show_toast("✅ Đã thêm báo cáo bất thường mới lên Supabase!")
+        self._require_admin(lambda: self.drawer.open_for_create())
 
     def _on_edit_report(self):
         if not self.selected_report:
             messagebox.showwarning("Chưa chọn", "Vui lòng click chọn một báo cáo trên bảng để chỉnh sửa!")
             return
-        self._require_admin(lambda: AnomalyEditDialog(self, report_data=self.selected_report, on_saved=self._on_report_updated))
+        self._require_admin(lambda: self.drawer.open_for_edit(self.selected_report))
 
-    def _on_report_updated(self, updated_rep):
+    def _on_drawer_saved(self, saved_rep):
         self.refresh_data()
         if hasattr(self.app, "show_toast"):
-            self.app.show_toast(f"✅ Đã cập nhật báo cáo #{updated_rep.get('id')} thành công!")
+            self.app.show_toast("✅ Đã lưu báo cáo bất thường thành công!")
 
     def _on_delete_report(self):
         if not self.selected_report:
@@ -1569,6 +1723,9 @@ class AnomalyReportView(ctk.CTkFrame):
             if confirm:
                 ok = svc.delete_report(rep["id"], rep.get("image_url"))
                 if ok:
+                    if hasattr(self, "drawer") and self.drawer.winfo_manager() == "pack":
+                        if str(self.drawer.report_data.get("id")) == str(rep.get("id")):
+                            self.drawer.close_drawer()
                     self.selected_report = None
                     self._update_action_buttons_state()
                     self.refresh_data()
