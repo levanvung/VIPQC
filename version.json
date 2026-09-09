@@ -1,8 +1,8 @@
 {
-  "version": "2.2.4",
+  "version": "2.2.6",
   "release_date": "2026-09-09",
-  "title": "VIPQC AI v2.2.4 — Upload bản vẽ và scan contour điểm QC",
-  "changelog": "- Sau khi so sánh BOM, hỏi người dùng có muốn upload bản vẽ PCB riêng hay không\n- Quét bản vẽ PDF và đánh dấu contour các vị trí Added, Removed/DNP và Modified\n- Không còn tự dùng PDF BOM làm bản vẽ hiển thị\n- Hiển thị số Ref đã scan được trên tổng số vị trí cần kiểm",
+  "title": "VIPQC AI v2.2.6 — Tinh gọn phân hệ So Sánh 2 BOM FAI",
+  "changelog": "- Loại bỏ tính năng upload bản vẽ ở phân hệ So Sánh 2 BOM, giúp giao diện tối giản, tập trung 100% vào dữ liệu FAI\n- Loại bỏ popup làm phiền sau khi đối chiếu BOM\n- Hỗ trợ đọc file Excel BOM đa Sheet tự động và bao quát toàn bộ danh mục vật tư Non-SMT\n- Tối ưu hóa tốc độ xuất biên bản kiểm tra FAI Excel",
   "download_url": "https://github.com/levanvung/VIPQC/raw/master/VIPQC%20AI.exe",
   "release_url": "https://github.com/levanvung/VIPQC"
 }

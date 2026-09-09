@@ -4148,132 +4148,7 @@ class ModelCompareView(ctk.CTkFrame):
 
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# SERIES BOM DRAWING INSPECTOR
-# ──────────────────────────────────────────────────────────────────────────────
-class SeriesBOMDrawingWindow(ctk.CTkToplevel):
-    """Shows QC focus locations highlighted on the selected BOM PDF drawing."""
 
-    def __init__(self, parent, app, pdf_path: str, comparison_result: dict,
-                 active_loc: str | None = None, on_close_cb=None):
-        super().__init__(parent)
-        self.app = app
-        self.pdf_path = pdf_path
-        self.comparison_result = comparison_result or {}
-        self.active_loc = active_loc
-        self.on_close_cb = on_close_cb
-        self.page_infos = sbc.get_drawing_pages_info(pdf_path)
-        self.page_index = 0
-        self.zoom = 0.7
-        self.tk_image = None
-
-        self.title("📐 Bản Vẽ QC — Điểm Cần Chú Ý")
-        self.geometry("1440x900")
-        self.minsize(900, 600)
-        self.configure(fg_color=BG_DEEP[1] if app.current_theme == "dark" else BG_DEEP[0])
-        self.protocol("WM_DELETE_WINDOW", self._close)
-
-        self._build_ui()
-        self.after(80, self._render)
-
-    def _build_ui(self):
-        is_dark = self.app.current_theme == "dark"
-        bar_bg = BG_CARD[1] if is_dark else BG_CARD[0]
-        text = TEXT_PRIMARY[1] if is_dark else TEXT_PRIMARY[0]
-
-        top = ctk.CTkFrame(self, fg_color=bar_bg, corner_radius=0, height=56)
-        top.pack(fill="x")
-        top.pack_propagate(False)
-
-        ctk.CTkLabel(
-            top, text="📐  ĐIỂM CẦN CHÚ Ý TRÊN BẢN VẼ",
-            font=("Segoe UI", 12, "bold"), text_color=ACCENT_TEAL
-        ).pack(side="left", padx=16)
-
-        self.page_var = ctk.StringVar(value="")
-        page_labels = [p["label"] for p in self.page_infos] or ["Không có trang PDF"]
-        self.page_menu = ctk.CTkOptionMenu(
-            top, variable=self.page_var, values=page_labels,
-            width=270, height=30, font=("Segoe UI", 9, "bold"),
-            fg_color=BG_SURFACE, button_color=ACCENT_TEAL,
-            command=self._on_page_change
-        )
-        self.page_menu.pack(side="left", padx=(6, 12))
-        if self.page_infos:
-            self.page_var.set(page_labels[0])
-
-        self.btn_zoom_out = ctk.CTkButton(
-            top, text="−", width=30, height=28, fg_color=BG_SURFACE,
-            hover_color=BG_HOVER, text_color=text, command=lambda: self._change_zoom(-0.15)
-        )
-        self.btn_zoom_out.pack(side="left", padx=2)
-        self.lbl_zoom = ctk.CTkLabel(top, text="70%", width=48, text_color=text)
-        self.lbl_zoom.pack(side="left")
-        self.btn_zoom_in = ctk.CTkButton(
-            top, text="+", width=30, height=28, fg_color=BG_SURFACE,
-            hover_color=BG_HOVER, text_color=text, command=lambda: self._change_zoom(0.15)
-        )
-        self.btn_zoom_in.pack(side="left", padx=2)
-
-        ctk.CTkLabel(
-            top, text="🟢 Thêm   🔴 Bỏ/DNP   🟡 Đổi mã   🔵 Đang chọn",
-            font=("Segoe UI", 9, "bold"), text_color=TEXT_MUTED
-        ).pack(side="right", padx=16)
-
-        self.lbl_scan = ctk.CTkLabel(
-            top, text="SCAN: 0/0 vị trí",
-            font=("Consolas", 9, "bold"), text_color=ACCENT_AMBER
-        )
-        self.lbl_scan.pack(side="right", padx=(0, 12))
-
-        body = ctk.CTkFrame(self, fg_color="#0B0F1A", corner_radius=0)
-        body.pack(fill="both", expand=True, padx=10, pady=(8, 10))
-        self.vsb = tk.Scrollbar(body, orient="vertical")
-        self.hsb = tk.Scrollbar(body, orient="horizontal")
-        self.canvas = tk.Canvas(body, bg="#0B0F1A", highlightthickness=0,
-                                xscrollcommand=self.hsb.set, yscrollcommand=self.vsb.set)
-        self.vsb.configure(command=self.canvas.yview)
-        self.hsb.configure(command=self.canvas.xview)
-        self.vsb.pack(side="right", fill="y")
-        self.hsb.pack(side="bottom", fill="x")
-        self.canvas.pack(side="left", fill="both", expand=True)
-
-    def _on_page_change(self, label: str):
-        for index, page in enumerate(self.page_infos):
-            if page["label"] == label:
-                self.page_index = index
-                break
-        self._render()
-
-    def _change_zoom(self, delta: float):
-        self.zoom = max(0.25, min(2.0, self.zoom + delta))
-        self.lbl_zoom.configure(text=f"{int(self.zoom * 100)}%")
-        self._render()
-
-    def set_active_location(self, location: str | None):
-        self.active_loc = location
-        self._render()
-
-    def _render(self):
-        if not self.page_infos or not self.comparison_result:
-            return
-        focus_items = self.comparison_result.get("qc_focus_items", [])
-        image, located = sbc.render_annotated_drawing_page(
-            self.pdf_path, self.page_index, focus_items,
-            active_loc=self.active_loc, zoom=self.zoom
-        )
-        if image is None:
-            return
-        self.lbl_scan.configure(text=f"SCAN: {len(located)}/{len(focus_items)} vị trí")
-        self.tk_image = ImageTk.PhotoImage(image)
-        self.canvas.delete("all")
-        self.canvas.create_image(12, 12, image=self.tk_image, anchor="nw")
-        self.canvas.configure(scrollregion=(0, 0, image.width + 24, image.height + 24))
-
-    def _close(self):
-        if self.on_close_cb:
-            self.on_close_cb()
-        self.destroy()
 
 
 # ─── SERIES BOM COMPARE VIEW (TAB 4) ─────────────────────────────────────────
@@ -4301,8 +4176,6 @@ class SeriesBOMCompareView(ctk.CTkFrame):
 
         self.qc_status_map = {}  # loc -> 'OK', 'NG', 'PENDING'
         self.active_loc = None
-        self.drawing_window = None
-        self.drawing_path = None
 
         self._loading_hud = None
 
@@ -4499,13 +4372,6 @@ class SeriesBOMCompareView(ctk.CTkFrame):
             font=("Segoe UI", 10, "bold"), text_color=ACCENT_AMBER
         )
         self.lbl_qc_progress.pack(side="right", padx=10)
-
-        self.btn_open_drawing = ctk.CTkButton(
-            qc_head, text="📐 Upload bản vẽ PCB", font=("Segoe UI", 9, "bold"),
-            height=24, width=136, fg_color=ACCENT_BLUE, hover_color="#1D4ED8",
-            state="disabled", command=self._upload_drawing
-        )
-        self.btn_open_drawing.pack(side="right", padx=(4, 0))
 
         qc_sub = ctk.CTkFrame(self.card_qc_focus, fg_color="transparent")
         qc_sub.pack(fill="x", padx=10, pady=(0, 3))
@@ -4724,7 +4590,6 @@ class SeriesBOMCompareView(ctk.CTkFrame):
         self.comparison_result = None
         self.qc_status_map = {}
         self.active_loc = None
-        self.drawing_path = None
 
         self.lbl_file_a_name.configure(text="Chưa chọn BOM Series A")
         self.lbl_file_a_meta.configure(text="Model: — | Series: —")
@@ -4736,10 +4601,6 @@ class SeriesBOMCompareView(ctk.CTkFrame):
         )
         self.btn_run_compare.configure(state="disabled", text="⚡ SO SÁNH 2 BOM")
         self.btn_export_fai.configure(state="disabled")
-        self.btn_open_drawing.configure(state="disabled")
-        if self.drawing_window:
-            self.drawing_window._close()
-            self.drawing_window = None
         for _, value_label, color in self.kpi_boxes.values():
             value_label.configure(text="0", text_color=color)
         self.kpi_boxes["matched"][1].configure(text="0 (0%)")
@@ -4787,9 +4648,6 @@ class SeriesBOMCompareView(ctk.CTkFrame):
         self.btn_run_compare.configure(state="normal", text="⚡ SO SÁNH 2 BOM")
         self.btn_export_fai.configure(state="normal")
         self.is_comparing = False
-        self.drawing_path = None
-        if result.get("qc_focus_items"):
-            self.btn_open_drawing.configure(state="normal")
 
         s = result["summary"]
         v_stat = s["validation_status"]
@@ -4822,57 +4680,7 @@ class SeriesBOMCompareView(ctk.CTkFrame):
         self.filter_var.set("🎯 Cần chú ý")
         self._populate_table()
 
-        if result.get("qc_focus_items"):
-            self.after(250, self._ask_upload_drawing)
-
         self.app.set_status(f"Hoàn thành so sánh 2 BOM! {s['focus_count']} linh kiện cần chú ý kiểm tra.")
-
-    def _ask_upload_drawing(self):
-        should_upload = messagebox.askyesno(
-            "Upload bản vẽ PCB",
-            "Đã tìm thấy các vị trí cần chú ý trong BOM.\n\n"
-            "Bạn có muốn upload bản vẽ PCB để quét và đánh dấu contour các vị trí này không?"
-        )
-        if should_upload:
-            self._upload_drawing()
-
-    def _upload_drawing(self):
-        drawing_path = filedialog.askopenfilename(
-            title="Chọn bản vẽ PCB để quét vị trí QC",
-            filetypes=[("PCB Drawing PDF", "*.pdf")]
-        )
-        if not drawing_path:
-            return
-
-        drawing_path = os.path.normpath(drawing_path)
-        if os.path.getsize(drawing_path) > MAX_FILE_SIZE_BYTES:
-            messagebox.showwarning(
-                "File quá lớn",
-                f"File bản vẽ '{os.path.basename(drawing_path)}' vượt quá 10MB!"
-            )
-            return
-
-        self.drawing_path = drawing_path
-        self._open_drawing_window()
-
-    def _open_drawing_window(self):
-        if self.drawing_window and self.drawing_window.winfo_exists():
-            self.drawing_window.lift()
-            self.drawing_window.focus_force()
-            return
-
-        pdf_path = self.drawing_path
-        if not pdf_path or not os.path.exists(pdf_path):
-            messagebox.showinfo(
-                "Chưa upload bản vẽ",
-                "Hãy upload riêng file bản vẽ PCB sau khi so sánh BOM."
-            )
-            return
-        self.drawing_window = SeriesBOMDrawingWindow(
-            self, self.app, pdf_path, self.comparison_result,
-            active_loc=self.active_loc,
-            on_close_cb=lambda: setattr(self, "drawing_window", None)
-        )
 
     def _on_compare_error(self, err_msg):
         self._hide_loading_hud()
@@ -4938,8 +4746,6 @@ class SeriesBOMCompareView(ctk.CTkFrame):
             return
 
         self.active_loc = item_id
-        if self.drawing_window and self.drawing_window.winfo_exists():
-            self.drawing_window.set_active_location(item_id)
 
         # Toggle QC check status: PENDING -> OK -> NG -> PENDING
         current = self.qc_status_map.get(item_id, "PENDING")

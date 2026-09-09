@@ -5,7 +5,7 @@ a = Analysis(
     ['app.py'],
     pathex=[],
     binaries=[],
-    datas=[('version.json', '.'), ('c:/Users/QC60/AppData/Local/Programs/Python/Python314/Lib/site-packages/customtkinter', 'customtkinter'), ('e:/CODE/compare MATERIAL/VUNG Folder/VUNG Folder/public', 'public')],
+    datas=[('version.json', '.'), ('C:/Users/QC60/AppData/Local/Programs/Python/Python314/Lib/site-packages/customtkinter', 'customtkinter'), ('E:/CODE/compare MATERIAL/VUNG Folder/VUNG Folder/public', 'public')],
     hiddenimports=['pymupdf', 'fitz', 'openpyxl', 'openpyxl.styles', 'openpyxl.utils', 'et_xmlfile', 'PIL', 'tkinter', 'tkinter.ttk', 'tkinter.filedialog', 'tkinter.messagebox', 'customtkinter', 'windnd', 'bom_comparator', 'bom_extractor', 'excel_exporter', 'model_comparator', 'series_bom_comparator', 'series_bom_exporter', 'updater'],
     hookspath=[],
     hooksconfig={},
@@ -35,5 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['e:/CODE/compare MATERIAL/VUNG Folder/VUNG Folder/public/Logo.ico'],
+    icon=['E:/CODE/compare MATERIAL/VUNG Folder/VUNG Folder/public/Logo.ico'],
 )

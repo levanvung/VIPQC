@@ -138,77 +138,98 @@ def parse_erp_bom_pdf(pdf_path: str) -> Dict[str, Any]:
 
 def parse_excel_bom(excel_path: str) -> Dict[str, Any]:
     """
-    Parses an Excel BOM file (.xlsx / .xls).
-    Attempts to identify columns for Part Number, Locations / Ref Des, Qty, Description / Spec.
+    Parses an Excel BOM file (.xlsx / .xls / .xlsm).
+    Scans all worksheets to auto-detect the sheet containing BOM data and identifies
+    columns for Part Number, Locations / Ref Des, Qty, Description / Spec in VN, EN, CN.
     """
     import openpyxl
     
-    wb = openpyxl.load_workbook(excel_path, data_only=True)
-    ws = wb.active
-    
-    rows = list(ws.iter_rows(values_only=True))
-    if not rows:
-        return {
-            "file_path": excel_path,
-            "file_name": os.path.basename(excel_path),
-            "file_type": "excel",
-            "base_model": "",
-            "series": "",
-            "main_part_no": "",
-            "records": []
-        }
-        
-    # Find header row
-    header_idx = -1
-    col_map = {}
-    for r_idx, row in enumerate(rows[:20]):
-        row_str = [str(c).strip().upper() if c is not None else "" for c in row]
-        # Check for key header names
-        has_part = any("PART" in c or "MÃ" in c or "料號" in c for c in row_str)
-        has_loc = any("LOC" in c or "REF" in c or "VỊ TRÍ" in c or "位置" in c for c in row_str)
-        if has_part or has_loc:
-            header_idx = r_idx
+    if excel_path.lower().endswith(".xls") and not excel_path.lower().endswith((".xlsx", ".xlsm")):
+        raise ValueError(
+            f"File '{os.path.basename(excel_path)}' có định dạng .xls cũ (Excel 97-2003).\n"
+            "Vui lòng mở file bằng Microsoft Excel hoặc WPS rồi chọn 'Save As' sang .xlsx (Excel Workbook) để hệ thống đọc tốt nhất!"
+        )
+
+    try:
+        wb = openpyxl.load_workbook(excel_path, data_only=True)
+    except Exception as e:
+        err_str = str(e).lower()
+        if "does not support the old .xls" in err_str or "invalidfileexception" in err_str:
+            raise ValueError(
+                f"File '{os.path.basename(excel_path)}' là định dạng .xls cũ.\n"
+                "Vui lòng mở file bằng Excel và bấm 'Save As' sang .xlsx (Excel Workbook) để tiếp tục."
+            )
+        raise
+
+    best_records = []
+    best_sheet_name = ""
+
+    # Check each sheet in the workbook to locate the one with the most valid BOM records
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        rows = list(ws.iter_rows(values_only=True))
+        if not rows:
+            continue
+
+        header_idx = -1
+        col_map = {}
+        for r_idx, row in enumerate(rows[:25]):
+            row_str = [str(c).strip().upper() if c is not None else "" for c in row]
             for c_idx, val in enumerate(row_str):
-                if any(k in val for k in ["PART NO", "PART NUMBER", "MATERIAL", "MÃ LK", "MÃ VẬT TƯ", "元件料號"]):
-                    col_map["part_no"] = c_idx
-                elif any(k in val for k in ["LOCATION", "REF", "VỊ TRÍ", "插件位置", "DESIGNATOR"]):
-                    col_map["locations"] = c_idx
-                elif any(k in val for k in ["QTY", "QUANTITY", "SL", "SỐ LƯỢNG", "用量"]):
-                    col_map["qty"] = c_idx
-                elif any(k in val for k in ["DESC", "SPEC", "SPECIFICATION", "THÔNG SỐ", "规格", "品名"]):
-                    col_map["spec"] = c_idx
-                elif any(k in val for k in ["NO", "STT", "項次"]):
-                    col_map["item_no"] = c_idx
-            break
-            
-    records = []
-    if header_idx != -1 and "part_no" in col_map:
-        for r_idx in range(header_idx + 1, len(rows)):
-            row = rows[r_idx]
-            part_val = str(row[col_map["part_no"]]).strip() if col_map.get("part_no") is not None and row[col_map["part_no"]] is not None else ""
-            if not part_val or part_val.lower() == "none":
-                continue
-                
-            loc_val = str(row[col_map["locations"]]).strip() if col_map.get("locations") is not None and row[col_map["locations"]] is not None else ""
-            locations = [l.strip() for l in re.findall(r"[A-Za-z0-9\-_]+", loc_val) if l.strip()]
-            
-            qty_val = str(row[col_map["qty"]]).strip() if col_map.get("qty") is not None and row[col_map["qty"]] is not None else "1"
-            spec_val = str(row[col_map["spec"]]).strip() if col_map.get("spec") is not None and row[col_map["spec"]] is not None else ""
-            item_no = str(row[col_map["item_no"]]).strip() if col_map.get("item_no") is not None and row[col_map["item_no"]] is not None else str(len(records) + 1)
-            
-            records.append({
-                "item_no": item_no,
-                "level": "1",
-                "part_no": part_val,
-                "old_part": "",
-                "spec": spec_val,
-                "src": "",
-                "unit": "PCS",
-                "qty": qty_val,
-                "loss": "",
-                "locations": locations,
-                "page": 1
-            })
+                if not val:
+                    continue
+                if any(k in val for k in ["PART NO", "PART NUMBER", "MATERIAL", "MÃ LK", "MÃ LINH KIỆN", "MÃ VẬT TƯ", "元件料號", "料號", "料号", "物料编码", "PART_NO"]):
+                    if "part_no" not in col_map:
+                        col_map["part_no"] = c_idx
+                elif any(k in val for k in ["LOCATION", "LOCATIONS", "REF", "REF DES", "DESIGNATOR", "DESIGNATORS", "VỊ TRÍ", "插件位置", "位置", "REMARKS"]):
+                    if "locations" not in col_map:
+                        col_map["locations"] = c_idx
+                elif any(k in val for k in ["QTY", "QUANTITY", "SL", "SỐ LƯỢNG", "用量", "数量"]):
+                    if "qty" not in col_map:
+                        col_map["qty"] = c_idx
+                elif any(k in val for k in ["DESC", "SPEC", "SPECIFICATION", "THÔNG SỐ", "规格", "品名", "RATING", "VALUE", "QUY CÁCH"]):
+                    if "spec" not in col_map:
+                        col_map["spec"] = c_idx
+                elif any(k in val for k in ["NO", "ITEM", "ITEM NO", "STT", "SEQ", "項次", "站位"]):
+                    if "item_no" not in col_map:
+                        col_map["item_no"] = c_idx
+
+            if "part_no" in col_map and ("locations" in col_map or "qty" in col_map):
+                header_idx = r_idx
+                break
+
+        if header_idx != -1 and "part_no" in col_map:
+            sheet_records = []
+            for r_idx in range(header_idx + 1, len(rows)):
+                row = rows[r_idx]
+                part_val = str(row[col_map["part_no"]]).strip() if col_map.get("part_no") is not None and row[col_map["part_no"]] is not None else ""
+                if not part_val or part_val.lower() in ["none", "null", "nan", ""]:
+                    continue
+
+                loc_val = str(row[col_map["locations"]]).strip() if col_map.get("locations") is not None and row[col_map["locations"]] is not None else ""
+                locations = [l.strip() for l in re.findall(r"[A-Za-z0-9\-_]+", loc_val) if l.strip()]
+
+                qty_val = str(row[col_map["qty"]]).strip() if col_map.get("qty") is not None and row[col_map["qty"]] is not None else "1"
+                spec_val = str(row[col_map["spec"]]).strip() if col_map.get("spec") is not None and row[col_map["spec"]] is not None else ""
+                item_no = str(row[col_map["item_no"]]).strip() if col_map.get("item_no") is not None and row[col_map["item_no"]] is not None else str(len(sheet_records) + 1)
+
+                sheet_records.append({
+                    "item_no": item_no,
+                    "level": "1",
+                    "part_no": part_val,
+                    "old_part": "",
+                    "spec": spec_val,
+                    "src": "",
+                    "unit": "PCS",
+                    "qty": qty_val,
+                    "loss": "",
+                    "locations": locations,
+                    "page": 1
+                })
+
+            if len(sheet_records) > len(best_records):
+                best_records = sheet_records
+                best_sheet_name = sheet_name
 
     base_model, series = extract_model_and_series(os.path.basename(excel_path))
 
@@ -217,12 +238,12 @@ def parse_excel_bom(excel_path: str) -> Dict[str, Any]:
         "file_name": os.path.basename(excel_path),
         "file_type": "excel",
         "company_name": "",
-        "report_title": "Excel BOM",
+        "report_title": f"Excel BOM ({best_sheet_name or 'Sheet 1'})",
         "main_part_no": os.path.basename(excel_path),
         "base_model": base_model,
         "series": series,
         "total_pages": 1,
-        "records": records
+        "records": best_records
     }
 
 
@@ -245,17 +266,35 @@ def compare_series_boms(bom_a_data: Dict[str, Any], bom_b_data: Dict[str, Any]) 
     """
     # 1. Map each location to its component record
     loc_map_a: Dict[str, Dict[str, Any]] = {}
+    non_loc_a: List[Dict[str, Any]] = []
     for r in bom_a_data.get("records", []):
-        for loc in r.get("locations", []):
-            loc_map_a[loc] = r
-            
+        locs = r.get("locations", [])
+        if locs:
+            for loc in locs:
+                loc_map_a[loc] = r
+        else:
+            non_loc_a.append(r)
+
     loc_map_b: Dict[str, Dict[str, Any]] = {}
+    non_loc_b: List[Dict[str, Any]] = []
     for r in bom_b_data.get("records", []):
-        for loc in r.get("locations", []):
-            loc_map_b[loc] = r
-            
+        locs = r.get("locations", [])
+        if locs:
+            for loc in locs:
+                loc_map_b[loc] = r
+        else:
+            non_loc_b.append(r)
+
+    # Include non-location items (Bare PCB, mechanical parts, accessories) with unique identifiers
+    for r in non_loc_a:
+        key = f"[Non-SMT] {r.get('part_no', '')}"
+        loc_map_a[key] = r
+    for r in non_loc_b:
+        key = f"[Non-SMT] {r.get('part_no', '')}"
+        loc_map_b[key] = r
+
     all_locations = sorted(list(set(loc_map_a.keys()) | set(loc_map_b.keys())))
-    
+
     # 2. Categorization
     added_items: List[Dict[str, Any]] = []
     removed_items: List[Dict[str, Any]] = []
@@ -479,10 +518,19 @@ def locate_focus_items_on_drawing(doc: pymupdf.Document, page_idx: int, focus_it
         if clean_w:
             word_map.setdefault(clean_w, []).append((w[0], w[1], w[2], w[3]))
 
+    # Scan adjacent pairs for split designator tokens (e.g. 'R' and '7501', 'X' and '1')
+    for i in range(len(words) - 1):
+        w1, w2 = words[i], words[i + 1]
+        if abs(w1[1] - w2[1]) < 6:
+            combined = re.sub(r"[,\s;:\-_/]", "", w1[4] + w2[4]).upper()
+            if combined:
+                merged = (min(w1[0], w2[0]), min(w1[1], w2[1]), max(w1[2], w2[2]), max(w1[3], w2[3]))
+                word_map.setdefault(combined, []).append(merged)
+
     located = {}
     for item in focus_items:
         loc = item.get("location", "").strip()
-        if not loc:
+        if not loc or loc.startswith("["):
             continue
         clean_loc = re.sub(r"[,\s;:\-_/]", "", loc).upper()
         rects = word_map.get(clean_loc, [])
@@ -499,6 +547,33 @@ def locate_focus_items_on_drawing(doc: pymupdf.Document, page_idx: int, focus_it
 
     page.set_rotation(orig_rot)
     return located
+
+
+def find_location_page(pdf_path: str, location: str) -> int:
+    """
+    Finds which page of a drawing PDF contains a specific Ref Des location.
+    Returns 0-based page_index, or -1 if not found.
+    """
+    if not os.path.exists(pdf_path) or not location or location.startswith("["):
+        return -1
+    clean_loc = re.sub(r"[,\s;:\-_/]", "", location).upper()
+    try:
+        doc = pymupdf.open(pdf_path)
+        for p_idx in range(len(doc)):
+            page = doc[p_idx]
+            raw = page.search_for(location)
+            if raw:
+                doc.close()
+                return p_idx
+            words = page.get_text("words")
+            for w in words:
+                if re.sub(r"[,\s;:\-_/]", "", w[4]).upper() == clean_loc:
+                    doc.close()
+                    return p_idx
+        doc.close()
+    except Exception:
+        pass
+    return -1
 
 
 def extract_drawing_model_info(pdf_path: str) -> Dict[str, Any]:
