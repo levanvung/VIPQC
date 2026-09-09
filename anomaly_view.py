@@ -256,17 +256,18 @@ class AnomalyImageStudioWindow(ctk.CTkToplevel):
             self._load_image_async()
 
     def _build_ui(self):
-        # ── TOP TOOLBAR ──────────────────────────────────────────────────────
-        bar = ctk.CTkFrame(self, fg_color=BG_CARD, height=56, corner_radius=0,
+        # ── TOP TOOLBAR (2 ROWS) ─────────────────────────────────────────────
+        bar = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=0,
                            border_width=1, border_color=BORDER_CLR)
         bar.pack(fill="x", side="top")
-        bar.pack_propagate(False)
 
-        inner = ctk.CTkFrame(bar, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=12, pady=8)
+        # ── ROW 1: MARKING TOOLS & STYLES (CÔNG CỤ ĐÁNH DẤU) ────────────────
+        row1 = ctk.CTkFrame(bar, fg_color="transparent", height=42)
+        row1.pack(fill="x", padx=12, pady=(6, 2))
+        row1.pack_propagate(False)
 
         # Title & Info
-        ctk.CTkLabel(inner, text="🎨 STUDIO ĐÁNH DẤU ẢNH", font=FONT_H1, text_color=ACCENT_TEAL).pack(side="left", padx=(4, 12))
+        ctk.CTkLabel(row1, text="🎨 CÔNG CỤ VẼ & ĐÁNH DẤU:", font=FONT_H1, text_color=ACCENT_TEAL).pack(side="left", padx=(2, 10))
 
         # Tool selector buttons
         self.tool_buttons = {}
@@ -281,7 +282,7 @@ class AnomalyImageStudioWindow(ctk.CTkToplevel):
 
         for t_key, t_label in tools:
             btn = ctk.CTkButton(
-                inner, text=t_label, width=82, height=34, corner_radius=6,
+                row1, text=t_label, width=82, height=30, corner_radius=6,
                 font=FONT_SMALL,
                 fg_color=ACCENT_TEAL if t_key == self.current_tool else BG_SURFACE,
                 text_color=("#FFFFFF", "#0B0F1A") if t_key == self.current_tool else TEXT_PRIMARY,
@@ -292,7 +293,7 @@ class AnomalyImageStudioWindow(ctk.CTkToplevel):
             self.tool_buttons[t_key] = btn
 
         # Separator
-        ctk.CTkFrame(inner, fg_color=BORDER_CLR, width=1, height=28).pack(side="left", padx=8)
+        ctk.CTkFrame(row1, fg_color=BORDER_CLR, width=1, height=24).pack(side="left", padx=8)
 
         # Color picker buttons
         self.color_buttons = {}
@@ -306,7 +307,7 @@ class AnomalyImageStudioWindow(ctk.CTkToplevel):
         ]
         for c_hex, c_name in colors:
             btn = ctk.CTkButton(
-                inner, text="", width=24, height=24, corner_radius=12,
+                row1, text="", width=24, height=24, corner_radius=12,
                 fg_color=c_hex, hover_color=c_hex,
                 border_width=2 if c_hex == self.current_color else 0,
                 border_color="#FFFFFF" if c_hex != "#FFFFFF" else "#0F172A",
@@ -316,11 +317,11 @@ class AnomalyImageStudioWindow(ctk.CTkToplevel):
             self.color_buttons[c_hex] = btn
 
         # Stroke width selector
-        ctk.CTkFrame(inner, fg_color=BORDER_CLR, width=1, height=28).pack(side="left", padx=6)
+        ctk.CTkFrame(row1, fg_color=BORDER_CLR, width=1, height=24).pack(side="left", padx=6)
         self.width_buttons = {}
         for w_val, w_label in [(2, "2px"), (4, "4px"), (6, "6px")]:
             w_btn = ctk.CTkButton(
-                inner, text=w_label, width=38, height=30, corner_radius=6,
+                row1, text=w_label, width=38, height=28, corner_radius=6,
                 font=FONT_SMALL,
                 fg_color=ACCENT_TEAL if w_val == self.current_width else BG_SURFACE,
                 text_color=("#FFFFFF", "#0B0F1A") if w_val == self.current_width else TEXT_PRIMARY,
@@ -330,51 +331,73 @@ class AnomalyImageStudioWindow(ctk.CTkToplevel):
             w_btn.pack(side="left", padx=1)
             self.width_buttons[w_val] = w_btn
 
-        # Separator
-        ctk.CTkFrame(inner, fg_color=BORDER_CLR, width=1, height=28).pack(side="left", padx=8)
-
-        # Action: Undo
-        ctk.CTkButton(inner, text="↩️ Hoàn tác", width=85, height=34, font=FONT_SMALL,
-                      fg_color=BG_SURFACE, text_color=TEXT_PRIMARY, hover_color=BG_HOVER,
-                      command=self._undo).pack(side="left", padx=2)
-
-        # Action: Clear All Marks
-        ctk.CTkButton(inner, text="🗑️ Xóa nét", width=75, height=34, font=FONT_SMALL,
+        # Right side of Row 1: Undo and Clear
+        ctk.CTkButton(row1, text="🗑️ Xóa hết nét", width=95, height=30, font=FONT_SMALL,
                       fg_color=BG_SURFACE, text_color=ACCENT_RED, hover_color=BG_HOVER,
-                      command=self._clear_annotations).pack(side="left", padx=2)
+                      command=self._clear_annotations).pack(side="right", padx=(2, 0))
 
-        # Separator
-        ctk.CTkFrame(inner, fg_color=BORDER_CLR, width=1, height=28).pack(side="left", padx=8)
+        ctk.CTkButton(row1, text="↩️ Hoàn tác", width=85, height=30, font=FONT_SMALL,
+                      fg_color=BG_SURFACE, text_color=TEXT_PRIMARY, hover_color=BG_HOVER,
+                      command=self._undo).pack(side="right", padx=2)
+
+        # Subtle horizontal divider between Row 1 and Row 2
+        ctk.CTkFrame(bar, fg_color=BORDER_CLR, height=1).pack(fill="x", padx=8, pady=2)
+
+        # ── ROW 2: VIEW, FULLSCREEN, ZOOM & ACTIONS (ĐIỀU KHIỂN XEM & LƯU) ───
+        row2 = ctk.CTkFrame(bar, fg_color="transparent", height=42)
+        row2.pack(fill="x", padx=12, pady=(2, 6))
+        row2.pack_propagate(False)
+
+        # Ô PHÓNG TO TOÀN MÀN HÌNH (FULLSCREEN / MAXIMIZE TOGGLE)
+        self.btn_fullscreen = ctk.CTkButton(
+            row2, text="⛶ Toàn Màn Hình", width=140, height=30, font=FONT_H2,
+            fg_color=BG_SURFACE, text_color=ACCENT_TEAL, hover_color=BG_HOVER,
+            border_width=1, border_color=ACCENT_TEAL,
+            command=self._toggle_fullscreen
+        )
+        self.btn_fullscreen.pack(side="left", padx=(2, 8))
 
         # Rotate Button
-        ctk.CTkButton(inner, text="🔄 Xoay 90°", width=85, height=34, font=FONT_SMALL,
+        ctk.CTkButton(row2, text="🔄 Xoay 90° (R)", width=105, height=30, font=FONT_SMALL,
                       fg_color=BG_SURFACE, text_color=TEXT_PRIMARY, hover_color=BG_HOVER,
                       command=self._rotate_90).pack(side="left", padx=2)
 
+        # Separator
+        ctk.CTkFrame(row2, fg_color=BORDER_CLR, width=1, height=24).pack(side="left", padx=6)
+
         # Zoom Buttons
-        ctk.CTkButton(inner, text="🔍+", width=36, height=34, font=FONT_BOLD,
+        ctk.CTkButton(row2, text="🔍+", width=36, height=30, font=FONT_BOLD,
                       fg_color=BG_SURFACE, text_color=TEXT_PRIMARY, hover_color=BG_HOVER,
-                      command=lambda: self._zoom_by_factor(1.2)).pack(side="left", padx=2)
-        ctk.CTkButton(inner, text="🔍-", width=36, height=34, font=FONT_BOLD,
+                      command=lambda: self._zoom_by_factor(1.2)).pack(side="left", padx=1)
+        ctk.CTkButton(row2, text="🔍-", width=36, height=30, font=FONT_BOLD,
                       fg_color=BG_SURFACE, text_color=TEXT_PRIMARY, hover_color=BG_HOVER,
-                      command=lambda: self._zoom_by_factor(0.8)).pack(side="left", padx=2)
-        ctk.CTkButton(inner, text="Vừa Khung", width=80, height=34, font=FONT_SMALL,
+                      command=lambda: self._zoom_by_factor(0.8)).pack(side="left", padx=1)
+        ctk.CTkButton(row2, text="🎯 100%", width=60, height=30, font=FONT_SMALL,
+                      fg_color=BG_SURFACE, text_color=TEXT_PRIMARY, hover_color=BG_HOVER,
+                      command=self._zoom_to_100).pack(side="left", padx=2)
+        ctk.CTkButton(row2, text="🖼️ Vừa Khung", width=85, height=30, font=FONT_SMALL,
                       fg_color=BG_SURFACE, text_color=TEXT_PRIMARY, hover_color=BG_HOVER,
                       command=self._fit_to_screen).pack(side="left", padx=2)
 
-        self.lbl_zoom = ctk.CTkLabel(inner, text="100%", font=FONT_BOLD, text_color=ACCENT_TEAL, width=48)
+        self.lbl_zoom = ctk.CTkLabel(row2, text="100%", font=FONT_BOLD, text_color=ACCENT_TEAL, width=48)
         self.lbl_zoom.pack(side="left", padx=4)
 
-        # Right-side Save buttons
+        # Right side of Row 2: Close, Download, Save Cloud
+        ctk.CTkButton(
+            row2, text="✕ Đóng", width=75, height=30, font=FONT_SMALL,
+            fg_color=BG_SURFACE, text_color=TEXT_MUTED, hover_color=BG_HOVER,
+            command=self.destroy
+        ).pack(side="right", padx=(2, 0))
+
         self.btn_download = ctk.CTkButton(
-            inner, text="📥 Tải Về Máy", width=105, height=34, font=FONT_H2,
+            row2, text="📥 Tải Về Máy", width=110, height=30, font=FONT_SMALL,
             fg_color=BG_SURFACE, text_color=TEXT_PRIMARY, hover_color=BG_HOVER,
             command=self._download_to_pc
         )
-        self.btn_download.pack(side="right", padx=(4, 0))
+        self.btn_download.pack(side="right", padx=4)
 
         self.btn_save_cloud = ctk.CTkButton(
-            inner, text="💾 Lưu Lên Báo Cáo", width=145, height=34, font=FONT_H2,
+            row2, text="💾 Lưu Lên Báo Cáo", width=155, height=30, font=FONT_H2,
             fg_color=ACCENT_TEAL, text_color=("#FFFFFF", "#0B0F1A"),
             hover_color=("#0F766E", "#00A88C"),
             command=self._save_to_cloud
@@ -406,6 +429,53 @@ class AnomalyImageStudioWindow(ctk.CTkToplevel):
         self.bind("<Control-Z>", lambda e: self._undo())
         self.bind("<r>", lambda e: self._rotate_90())
         self.bind("<R>", lambda e: self._rotate_90())
+        self.bind("<F11>", lambda e: self._toggle_fullscreen())
+        self.bind("<Escape>", lambda e: self._exit_fullscreen_if_active())
+
+    def _toggle_fullscreen(self):
+        """Toggles window between Maximized (Full Screen) and Normal state, and auto-fits image."""
+        try:
+            is_zoomed = self.state() == "zoomed" or bool(self.attributes("-fullscreen"))
+            if is_zoomed:
+                try:
+                    self.attributes("-fullscreen", False)
+                except Exception:
+                    pass
+                self.state("normal")
+                self.btn_fullscreen.configure(text="⛶ Toàn Màn Hình", fg_color=BG_SURFACE)
+            else:
+                self.state("zoomed")
+                self.btn_fullscreen.configure(text="🗗 Thu Nhỏ Cửa Sổ", fg_color=ACCENT_TEAL)
+
+            self.after(150, self._fit_to_screen)
+        except Exception as e:
+            print(f"[Studio] Toggle fullscreen error: {e}")
+
+    def _exit_fullscreen_if_active(self):
+        try:
+            if self.state() == "zoomed" or bool(self.attributes("-fullscreen")):
+                try:
+                    self.attributes("-fullscreen", False)
+                except Exception:
+                    pass
+                self.state("normal")
+                self.btn_fullscreen.configure(text="⛶ Toàn Màn Hình", fg_color=BG_SURFACE)
+                self.after(150, self._fit_to_screen)
+        except Exception:
+            pass
+
+    def _zoom_to_100(self):
+        """Resets zoom level to 100% (1:1 pixel ratio) and centers image."""
+        base = self._get_current_base_pil()
+        if not base:
+            return
+        cw = max(self.canvas.winfo_width(), 600)
+        ch = max(self.canvas.winfo_height(), 500)
+        iw, ih = base.size
+        self.zoom_level = 1.0
+        self.pan_x = (cw - iw) // 2
+        self.pan_y = (ch - ih) // 2
+        self._render()
 
     def _on_canvas_configure(self, event):
         if not self._initial_fitted and self.original_pil:
