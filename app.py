@@ -5781,13 +5781,16 @@ class BOMExtractorApp(ctk.CTk):
 
     def _update_badges_for_anomaly(self):
         """Updates RGB stat badges to reflect Anomaly Reports statistics."""
-        self.badge_files.set_label("TỔNG BÁO CÁO")
-        self.badge_items.set_label("ĐÃ HOÀN THÀNH")
-        self.badge_qty.set_label("ĐANG XỬ LÝ")
+        t_total = "TỔNG BÁO CÁO" if self.current_lang == "vi" else ("报告总数" if self.current_lang == "zh" else "TOTAL REPORTS")
+        t_done = "ĐÃ HOÀN THÀNH" if self.current_lang == "vi" else ("已完成" if self.current_lang == "zh" else "COMPLETED")
+        t_prog = "ĐANG XỬ LÝ" if self.current_lang == "vi" else ("进行中" if self.current_lang == "zh" else "IN PROGRESS")
+        self.badge_files.set_label(t_total)
+        self.badge_items.set_label(t_done)
+        self.badge_qty.set_label(t_prog)
         if hasattr(self, "view_anomaly") and self.view_anomaly.all_reports:
             reps = self.view_anomaly.all_reports
-            done_cnt = sum(1 for r in reps if "hoàn thành" in str(r.get("progress", "")).lower())
-            in_prog = sum(1 for r in reps if "đang" in str(r.get("progress", "")).lower())
+            done_cnt = sum(1 for r in reps if any(k in str(r.get("progress", "")).lower() for k in ["hoàn thành", "已完成", "done", "complete"]))
+            in_prog = sum(1 for r in reps if any(k in str(r.get("progress", "")).lower() for k in ["đang", "进行", "progress"]))
             self.badge_files.set_value(len(reps))
             self.badge_items.set_value(done_cnt)
             self.badge_qty.set_value(in_prog)

@@ -73,11 +73,10 @@ I18N_ANOMALY = {
         "btn_refresh": "🔄 Làm Mới",
         "btn_refreshing": "⏳ Đang tải...",
         "btn_delete": "🗑️ Xóa",
-        "btn_edit": "✏️ Sửa",
         "btn_open_marking": "🖼️ Soi & Vẽ Ảnh",
         "btn_add": "➕ Thêm Báo Cáo",
         "tbl_count": "Danh Sách Báo Cáo: {count} bản ghi",
-        "hint_label": "💡 Click chọn dòng để Sửa/Xóa. Click đúp vào Ảnh để Soi & Đánh Dấu (Studio), click đúp vào dòng để Sửa.",
+        "hint_label": "💡 Click vào dòng để mở chi tiết & chỉnh sửa bên phải. Click đúp vào Ảnh để mở Studio.",
         "ctx_open_marking": "🖼️ Soi & Đánh Dấu Ảnh Lỗi (Studio)",
         "ctx_edit": "✏️ Chỉnh Sửa Báo Cáo",
         "ctx_delete": "🗑️ Xóa Báo Cáo Này",
@@ -165,11 +164,10 @@ I18N_ANOMALY = {
         "btn_refresh": "🔄 刷新",
         "btn_refreshing": "⏳ 正在加载...",
         "btn_delete": "🗑️ 删除",
-        "btn_edit": "✏️ 编辑",
         "btn_open_marking": "🖼️ 查看与标记",
         "btn_add": "➕ 新增报告",
         "tbl_count": "异常报告列表: {count} 条记录",
-        "hint_label": "💡 单击行可选择并编辑/删除。双击'图片'单元格进入工作室，双击数据行可在抽屉中编辑。",
+        "hint_label": "💡 点击数据行即可在右侧查看详情与编辑。双击图片可打开标绘工作室。",
         "ctx_open_marking": "🖼️ 查看与标记图片 (工作室)",
         "ctx_edit": "✏️ 编辑此报告",
         "ctx_delete": "🗑️ 删除此报告",
@@ -257,11 +255,10 @@ I18N_ANOMALY = {
         "btn_refresh": "🔄 Refresh",
         "btn_refreshing": "⏳ Loading...",
         "btn_delete": "🗑️ Delete",
-        "btn_edit": "✏️ Edit",
         "btn_open_marking": "🖼️ Mark Image",
         "btn_add": "➕ Add Report",
         "tbl_count": "Report List: {count} records",
-        "hint_label": "💡 Click row to select (Edit/Delete). Double-click 'Image' for Studio, double-click row to edit in Drawer.",
+        "hint_label": "💡 Click any row to view details & edit on the right. Double-click image to open Studio.",
         "ctx_open_marking": "🖼️ Inspect & Mark Image (Studio)",
         "ctx_edit": "✏️ Edit Report",
         "ctx_delete": "🗑️ Delete Report",
@@ -341,8 +338,10 @@ I18N_ANOMALY = {
 
 
 def normalize_prog(p_str: str) -> str:
-    """Normalizes raw progress string to canonical key: 'done', 'open', or 'in_progress'."""
+    """Normalizes raw progress string to canonical key: 'done', 'open', 'in_progress', or 'all'."""
     s = str(p_str or "").strip().lower()
+    if any(k in s for k in ["tất cả", "全部", "all"]):
+        return "all"
     if any(k in s for k in ["hoàn thành", "已完成", "complete", "done"]):
         return "done"
     if any(k in s for k in ["chưa", "未开始", "pending", "not"]):
@@ -353,6 +352,8 @@ def normalize_prog(p_str: str) -> str:
 def normalize_proc(p_str: str) -> str:
     """Normalizes process names for multi-language filter comparison."""
     s = str(p_str or "").strip().lower()
+    if any(k in s for k in ["tất cả", "全部", "all"]):
+        return "all"
     if any(k in s for k in ["lắp ráp", "组装", "assembly"]):
         return "assembly"
     if any(k in s for k in ["kcs", "final qc", "终检"]):
@@ -1493,7 +1494,7 @@ class AnomalyDrawerFrame(ctk.CTkFrame):
         self.current_lang = lang_code
         t = I18N_ANOMALY.get(lang_code, I18N_ANOMALY["vi"])
 
-        if self.is_edit:
+        if self.is_edit and self.report_data:
             rep_id = self.report_data.get("id", "")
             self.lbl_title.configure(text=f"{t['drawer_title_edit']} #{rep_id}")
         else:
@@ -1512,6 +1513,23 @@ class AnomalyDrawerFrame(ctk.CTkFrame):
         self.lbl_f_resp.configure(text=t["lbl_resp"])
         self.lbl_f_pic.configure(text=t["lbl_pic"])
         self.lbl_f_prog.configure(text=t["lbl_prog"])
+
+        drawer_procs = {
+            "vi": ["CHA", "SCP", "RAD", "CHP", "SMT", "Lắp Ráp", "KCS / Final QC", "Khác"],
+            "zh": ["CHA", "SCP", "RAD", "CHP", "SMT", "组装", "终检 / Final QC", "其他"],
+            "en": ["CHA", "SCP", "RAD", "CHP", "SMT", "Assembly", "Final QC", "Other"],
+        }
+        cur_proc = self.opt_process.get()
+        proc_norm = normalize_proc(cur_proc)
+        proc_map = {
+            "vi": {"assembly": "Lắp Ráp", "final_qc": "KCS / Final QC"},
+            "zh": {"assembly": "组装", "final_qc": "终检 / Final QC"},
+            "en": {"assembly": "Assembly", "final_qc": "Final QC"},
+        }
+        self.opt_process.configure(values=drawer_procs.get(lang_code, drawer_procs["vi"]))
+        new_proc = proc_map.get(lang_code, {}).get(proc_norm, cur_proc)
+        if new_proc in drawer_procs.get(lang_code, []):
+            self.opt_process.set(new_proc)
 
         cur_prog = self.opt_prog.get()
         p_norm = normalize_prog(cur_prog)
@@ -1838,6 +1856,8 @@ class AnomalyReportView(ctk.CTkFrame):
         self.filtered_reports: list[dict] = []
         self.selected_report: dict = None
         self.is_admin_session = False
+        self._row_orig_tags: dict[str, str] = {}
+        self._currently_highlighted_id: str = None
 
         # Thumbnail cache & high-performance image loading
         self._thumb_cache: dict[str, ImageTk.PhotoImage] = {}
@@ -1849,6 +1869,27 @@ class AnomalyReportView(ctk.CTkFrame):
 
         self._build_ui()
         self.refresh_data()
+
+    def _apply_row_highlight(self, rep_id):
+        """Applies a distinct high-contrast vibrant teal highlight to the selected row, restoring previous row's tags."""
+        if not rep_id or not hasattr(self, "tree") or not self.tree.exists(str(rep_id)):
+            return
+
+        # Restore previous highlighted row to its original tag
+        if self._currently_highlighted_id and self._currently_highlighted_id != str(rep_id):
+            if self.tree.exists(self._currently_highlighted_id):
+                orig_tag = self._row_orig_tags.get(self._currently_highlighted_id, "odd")
+                try:
+                    self.tree.item(self._currently_highlighted_id, tags=(orig_tag,))
+                except Exception:
+                    pass
+
+        # Set new highlighted row
+        self._currently_highlighted_id = str(rep_id)
+        try:
+            self.tree.item(str(rep_id), tags=("selected_row",))
+        except Exception:
+            pass
 
     def _make_placeholder_images(self, is_dark: bool = True):
         """Generates crisp 46x46 placeholder tiles for rows without images or while loading."""
@@ -2012,14 +2053,6 @@ class AnomalyReportView(ctk.CTkFrame):
         )
         self.btn_delete.pack(side="right", padx=4)
 
-        # Action: Edit selected
-        self.btn_edit = ctk.CTkButton(
-            top_bar, text=t["btn_edit"], width=80, height=36, corner_radius=8,
-            fg_color=BG_SURFACE, text_color=TEXT_PRIMARY, hover_color=BG_HOVER,
-            font=FONT_SMALL, command=self._on_edit_report, state="disabled"
-        )
-        self.btn_edit.pack(side="right", padx=4)
-
         # Action: Open Image Marking Studio
         self.btn_open_marking = ctk.CTkButton(
             top_bar, text=t["btn_open_marking"], width=120, height=36, corner_radius=8,
@@ -2118,6 +2151,7 @@ class AnomalyReportView(ctk.CTkFrame):
         hsb.grid(row=1, column=0, sticky="ew")
 
         # Treeview Interactions
+        self.tree.tag_configure("selected_row", background="#0D9488", foreground="#FFFFFF")
         self.tree.bind("<<TreeviewSelect>>", self._on_row_select)
         self.tree.bind("<Double-Button-1>", self._on_row_double_click)
         self.tree.bind("<ButtonRelease-1>", self._on_tree_cell_click)
@@ -2138,24 +2172,37 @@ class AnomalyReportView(ctk.CTkFrame):
             self.current_lang = lang_code
         t = I18N_ANOMALY.get(self.current_lang, I18N_ANOMALY["vi"])
 
+        target_id = self.selected_report.get("id") if self.selected_report else None
+
         self.ent_search.configure(placeholder_text=t["search_placeholder"])
 
         cur_proc = self.opt_filter_proc.get()
+        p_proc_norm = normalize_proc(cur_proc)
         self.opt_filter_proc.configure(values=t["proc_options"])
-        if cur_proc in ["Tất cả công đoạn", "全部过程", "All Processes"]:
+        if p_proc_norm == "all" or cur_proc in ["Tất cả công đoạn", "全部过程", "All Processes"]:
             self.opt_filter_proc.set(t["all_proc"])
+        else:
+            proc_map = {
+                "vi": {"assembly": "Lắp Ráp", "final_qc": "KCS / Final QC"},
+                "zh": {"assembly": "组装", "final_qc": "终检 / Final QC"},
+                "en": {"assembly": "Assembly", "final_qc": "Final QC"},
+            }
+            new_p = proc_map.get(self.current_lang, {}).get(p_proc_norm, cur_proc)
+            if new_p in t["proc_options"]:
+                self.opt_filter_proc.set(new_p)
+            else:
+                self.opt_filter_proc.set(t["all_proc"])
 
         cur_prog = self.opt_filter_prog.get()
+        p_prog_norm = normalize_prog(cur_prog)
         self.opt_filter_prog.configure(values=t["prog_options"])
-        if cur_prog in ["Tất cả tiến độ", "全部进度", "All Progress"]:
+        if p_prog_norm == "all" or cur_prog in ["Tất cả tiến độ", "全部进度", "All Progress"]:
             self.opt_filter_prog.set(t["all_prog"])
         else:
-            p_norm = normalize_prog(cur_prog)
-            self.opt_filter_prog.set(t.get(f"prog_val_{p_norm}", cur_prog))
+            self.opt_filter_prog.set(t.get(f"prog_val_{p_prog_norm}", cur_prog))
 
         self.btn_add.configure(text=t["btn_add"])
         self.btn_open_marking.configure(text=t["btn_open_marking"])
-        self.btn_edit.configure(text=t["btn_edit"])
         self.btn_delete.configure(text=t["btn_delete"])
         self.btn_refresh.configure(text=t["btn_refresh"])
         self.btn_export.configure(text=t["btn_export"])
@@ -2179,11 +2226,35 @@ class AnomalyReportView(ctk.CTkFrame):
         if hasattr(self, "drawer"):
             self.drawer.update_language(self.current_lang)
 
-        # Repopulate tree so row status reflects the new language
-        if hasattr(self, "filtered_reports") and self.filtered_reports:
-            self._populate_tree(self.filtered_reports)
-        elif self.all_reports:
-            self._populate_tree(self.all_reports)
+        # Repopulate tree with active filters in the current language
+        self._apply_filter()
+
+        # Preserve or auto-select row across language switch
+        sel_id = target_id
+        if sel_id is None and self.all_reports:
+            sel_id = self.all_reports[0].get("id")
+
+        if sel_id is not None:
+            found = [r for r in self.all_reports if str(r.get("id")) == str(sel_id)]
+            if not found and hasattr(self, "filtered_reports") and self.filtered_reports:
+                found = [r for r in self.filtered_reports if str(r.get("id")) == str(sel_id)]
+            if found:
+                self.selected_report = found[0]
+                try:
+                    str_id = str(sel_id)
+                    if self.tree.exists(str_id):
+                        self.tree.selection_set(str_id)
+                        self.tree.focus(str_id)
+                        self.tree.see(str_id)
+                        self._apply_row_highlight(str_id)
+                except Exception:
+                    pass
+            else:
+                self.selected_report = None
+        else:
+            self.selected_report = None
+
+        self._update_action_buttons_state()
 
     # ── DATA FETCH & POPULATE ────────────────────────────────────────────────
     def refresh_data(self, keep_id=None):
@@ -2208,16 +2279,24 @@ class AnomalyReportView(ctk.CTkFrame):
         self.btn_refresh.configure(state="normal", text=t["btn_refresh"])
         self._apply_filter()
 
-        # Preserve selection if the target report still exists
-        if target_id is not None:
-            found = [r for r in self.all_reports if str(r.get("id")) == str(target_id)]
+        # Preserve selection or auto-select first report
+        sel_id = target_id
+        if sel_id is None and reports:
+            sel_id = reports[0].get("id")
+
+        if sel_id is not None:
+            found = [r for r in self.all_reports if str(r.get("id")) == str(sel_id)]
+            if not found and hasattr(self, "filtered_reports") and self.filtered_reports:
+                found = [r for r in self.filtered_reports if str(r.get("id")) == str(sel_id)]
             if found:
                 self.selected_report = found[0]
                 try:
-                    if self.tree.exists(str(target_id)):
-                        self.tree.selection_set(str(target_id))
-                        self.tree.focus(str(target_id))
-                        self.tree.see(str(target_id))
+                    str_id = str(sel_id)
+                    if self.tree.exists(str_id):
+                        self.tree.selection_set(str_id)
+                        self.tree.focus(str_id)
+                        self.tree.see(str_id)
+                        self._apply_row_highlight(str_id)
                 except Exception:
                     pass
             else:
@@ -2244,15 +2323,16 @@ class AnomalyReportView(ctk.CTkFrame):
         f_proc = self.opt_filter_proc.get()
         f_prog = self.opt_filter_prog.get()
 
-        is_all_proc = f_proc in ["Tất cả công đoạn", "全部过程", "All Processes"]
-        is_all_prog = f_prog in ["Tất cả tiến độ", "全部进度", "All Progress"]
+        is_all_proc = f_proc in ["Tất cả công đoạn", "全部过程", "All Processes"] or normalize_proc(f_proc) == "all"
+        is_all_prog = f_prog in ["Tất cả tiến độ", "全部进度", "All Progress"] or normalize_prog(f_prog) == "all"
         prog_target_norm = normalize_prog(f_prog) if not is_all_prog else None
+        proc_target_norm = normalize_proc(f_proc) if not is_all_proc else None
 
         res = []
         for r in self.all_reports:
             if not is_all_proc:
                 r_proc = str(r.get("process") or "")
-                if normalize_proc(r_proc) != normalize_proc(f_proc):
+                if normalize_proc(r_proc) != proc_target_norm:
                     continue
             if not is_all_prog:
                 r_prog = str(r.get("progress") or "")
@@ -2267,8 +2347,54 @@ class AnomalyReportView(ctk.CTkFrame):
         self.filtered_reports = res
         self._populate_tree(res)
 
+        # Restore selection or auto-select first record in filtered results
+        target_id = self.selected_report.get("id") if self.selected_report else None
+        if target_id is not None:
+            found = [r for r in res if str(r.get("id")) == str(target_id)]
+            if found:
+                self.selected_report = found[0]
+                try:
+                    str_id = str(target_id)
+                    if self.tree.exists(str_id):
+                        self.tree.selection_set(str_id)
+                        self.tree.focus(str_id)
+                        self.tree.see(str_id)
+                        self._apply_row_highlight(str_id)
+                except Exception:
+                    pass
+            else:
+                if res:
+                    self.selected_report = res[0]
+                    first_id = str(res[0].get("id"))
+                    try:
+                        if self.tree.exists(first_id):
+                            self.tree.selection_set(first_id)
+                            self.tree.focus(first_id)
+                            self._apply_row_highlight(first_id)
+                    except Exception:
+                        pass
+                else:
+                    self.selected_report = None
+        else:
+            if res:
+                self.selected_report = res[0]
+                first_id = str(res[0].get("id"))
+                try:
+                    if self.tree.exists(first_id):
+                        self.tree.selection_set(first_id)
+                        self.tree.focus(first_id)
+                        self._apply_row_highlight(first_id)
+                except Exception:
+                    pass
+            else:
+                self.selected_report = None
+
+        self._update_action_buttons_state()
+
     def _populate_tree(self, reports: list[dict]):
         self.tree.delete(*self.tree.get_children())
+        self._row_orig_tags.clear()
+        self._currently_highlighted_id = None
         t = I18N_ANOMALY.get(self.current_lang, I18N_ANOMALY["vi"])
         self.lbl_tbl_count.configure(text=t["tbl_count"].format(count=len(reports)))
 
@@ -2310,33 +2436,41 @@ class AnomalyReportView(ctk.CTkFrame):
                 r.get("notes", "")
             )
             rep_id = str(r.get("id"))
+            self._row_orig_tags[rep_id] = tag
             thumb_photo = self._get_or_load_thumb(r.get("image_url"), rep_id)
             self.tree.insert("", "end", iid=rep_id, text="", image=thumb_photo, values=vals, tags=(tag,))
 
-    def _on_row_select(self, event):
+    def _on_row_select(self, event=None):
         selected_ids = self.tree.selection()
         if not selected_ids:
-            self.selected_report = None
-            self._update_action_buttons_state()
+            if not self.all_reports:
+                self.selected_report = None
+                self._update_action_buttons_state()
             return
         rep_id = selected_ids[0]
         found = [r for r in self.all_reports if str(r.get("id")) == str(rep_id)]
+        if not found and hasattr(self, "filtered_reports") and self.filtered_reports:
+            found = [r for r in self.filtered_reports if str(r.get("id")) == str(rep_id)]
         if found:
             self.selected_report = found[0]
-            self._update_action_buttons_state()
+            self._apply_row_highlight(rep_id)
+            # If drawer is already open, update it to the newly selected row
+            if hasattr(self, "drawer") and self.drawer.winfo_manager() == "grid":
+                self.drawer.open_for_edit(self.selected_report)
+        self._update_action_buttons_state()
 
     def _on_row_double_click(self, event):
         """
         Double clicking on a row:
         - If double clicking on the Image column (#0): opens the Image Marking Studio.
-        - If double clicking on any data column: opens the Drawer to edit the report.
+        - If double clicking on any data column: ensures Drawer is opened and focused.
         """
         col_id = self.tree.identify_column(event.x)
         row_id = self.tree.identify_row(event.y)
         region = self.tree.identify_region(event.x, event.y)
         if row_id:
             self.tree.selection_set(row_id)
-            self._on_row_select(None)
+        self._on_row_select(None)
 
         if not self.selected_report:
             return
@@ -2347,29 +2481,36 @@ class AnomalyReportView(ctk.CTkFrame):
                 self._open_marking_studio()
             else:
                 if messagebox.askyesno(t["no_img_title"], t["no_img_prompt"], parent=self):
-                    self._on_edit_report()
+                    self.drawer.open_for_edit(self.selected_report)
+                    self.drawer.lift()
         else:
-            self._on_edit_report()
+            self.drawer.open_for_edit(self.selected_report)
+            self.drawer.lift()
 
     def _on_tree_cell_click(self, event):
-        """Single click on any cell (including Image #0) ensures reliable row selection and button activation."""
+        """Single click on any cell opens the right-side drawer with full report details for editing."""
         row_id = self.tree.identify_row(event.y)
         if row_id:
             self.tree.selection_set(row_id)
             self._on_row_select(None)
+            self._apply_row_highlight(row_id)
+            if self.selected_report:
+                self.drawer.open_for_edit(self.selected_report)
+                self.drawer.lift()
 
     def _update_action_buttons_state(self):
         has_sel = self.selected_report is not None
-        self.btn_edit.configure(state="normal" if has_sel else "disabled")
-        self.btn_delete.configure(state="normal" if has_sel else "disabled")
+        has_data = bool(self.all_reports) or (hasattr(self, "filtered_reports") and bool(self.filtered_reports))
+        self.btn_delete.configure(state="normal" if (has_sel or has_data) else "disabled")
         has_img = has_sel and bool(self.selected_report.get("image_url"))
-        self.btn_open_marking.configure(state="normal" if has_img else "disabled")
+        self.btn_open_marking.configure(state="normal" if (has_img or has_data) else "disabled")
 
     def _show_context_menu(self, event):
         item = self.tree.identify_row(event.y)
         if item:
             self.tree.selection_set(item)
             self._on_row_select(None)
+            self._apply_row_highlight(item)
             try:
                 self.ctx_menu.tk_popup(event.x_root, event.y_root)
             finally:
@@ -2389,6 +2530,17 @@ class AnomalyReportView(ctk.CTkFrame):
     # ── OPEN IMAGE MARKING STUDIO ────────────────────────────────────────────
     def _open_marking_studio(self):
         t = I18N_ANOMALY.get(self.current_lang, I18N_ANOMALY["vi"])
+        if not self.selected_report:
+            sel = self.tree.selection()
+            if sel:
+                found = [r for r in self.all_reports if str(r.get("id")) == str(sel[0])]
+                if found:
+                    self.selected_report = found[0]
+                    self._apply_row_highlight(sel[0])
+            elif self.all_reports:
+                self.selected_report = self.all_reports[0]
+                self._apply_row_highlight(str(self.all_reports[0].get("id")))
+
         if not self.selected_report or not self.selected_report.get("image_url"):
             messagebox.showinfo(t["no_img_title"], t["no_img_alert"])
             return
@@ -2403,12 +2555,14 @@ class AnomalyReportView(ctk.CTkFrame):
             # Guarantee row selection and action buttons remain active when studio closes
             if cur_id:
                 try:
-                    if self.tree.exists(str(cur_id)):
-                        self.tree.selection_set(str(cur_id))
-                        self.tree.focus(str(cur_id))
+                    str_id = str(cur_id)
+                    if self.tree.exists(str_id):
+                        self.tree.selection_set(str_id)
+                        self.tree.focus(str_id)
                         found = [r for r in self.all_reports if str(r.get("id")) == str(cur_id)]
                         if found:
                             self.selected_report = found[0]
+                        self._apply_row_highlight(str_id)
                 except Exception:
                     pass
             self._update_action_buttons_state()
@@ -2459,14 +2613,63 @@ class AnomalyReportView(ctk.CTkFrame):
     # ── CRUD ACTIONS ─────────────────────────────────────────────────────────
     def _on_add_report(self):
         self.drawer.open_for_create()
+        self.drawer.lift()
 
     def _on_edit_report(self):
+        # 1. Fallback to tree selection if selected_report is not set
         if not self.selected_report:
-            t = I18N_ANOMALY.get(self.current_lang, I18N_ANOMALY["vi"])
-            messagebox.showwarning("Chưa chọn" if self.current_lang == "vi" else ("未选择" if self.current_lang == "zh" else "Not Selected"),
-                                   "Vui lòng click chọn một báo cáo trên bảng để chỉnh sửa!" if self.current_lang == "vi" else ("请在表格中选择一条报告进行编辑！" if self.current_lang == "zh" else "Please select a report row to edit!"))
+            sel = self.tree.selection()
+            if sel:
+                rep_id = sel[0]
+                found = [r for r in self.all_reports if str(r.get("id")) == str(rep_id)]
+                if not found and hasattr(self, "filtered_reports") and self.filtered_reports:
+                    found = [r for r in self.filtered_reports if str(r.get("id")) == str(rep_id)]
+                if found:
+                    self.selected_report = found[0]
+                    self._apply_row_highlight(rep_id)
+
+        # 2. If still not set, auto-select first row from active list
+        if not self.selected_report:
+            active_reps = getattr(self, "filtered_reports", None) or self.all_reports
+            if active_reps:
+                self.selected_report = active_reps[0]
+                first_id = str(active_reps[0].get("id"))
+                try:
+                    if self.tree.exists(first_id):
+                        self.tree.selection_set(first_id)
+                        self.tree.focus(first_id)
+                        self.tree.see(first_id)
+                        self._apply_row_highlight(first_id)
+                except Exception:
+                    pass
+                if hasattr(self.app, "show_toast"):
+                    self.app.show_toast(
+                        "💡 Đã tự động chọn báo cáo đầu tiên để chỉnh sửa!" if self.current_lang == "vi" else (
+                            "💡 已自动选择第一条报告进行编辑！" if self.current_lang == "zh" else
+                            "💡 Auto-selected the first report to edit!"
+                        )
+                    )
+
+        # 3. If table is empty, inform the user
+        if not self.selected_report:
+            msg = (
+                "Bảng hiện chưa có báo cáo nào để sửa. Vui lòng thêm báo cáo mới!" if self.current_lang == "vi" else (
+                    "表格中暂无报告可编辑。请先添加新报告！" if self.current_lang == "zh" else
+                    "No reports available to edit. Please add a new report first!"
+                )
+            )
+            if hasattr(self.app, "show_toast"):
+                self.app.show_toast(f"⚠️ {msg}")
+            else:
+                messagebox.showinfo(
+                    "Thông báo" if self.current_lang == "vi" else ("提示" if self.current_lang == "zh" else "Notice"),
+                    msg, parent=self
+                )
             return
+
+        # 4. Open drawer for editing and bring to front
         self.drawer.open_for_edit(self.selected_report)
+        self.drawer.lift()
 
     def _on_drawer_saved(self, saved_rep):
         if isinstance(saved_rep, dict) and saved_rep.get("image_url"):
@@ -2484,6 +2687,18 @@ class AnomalyReportView(ctk.CTkFrame):
             self.app.show_toast(t["saved_toast"])
 
     def _on_delete_report(self):
+        # 1. Fallback to tree selection if selected_report is not set
+        if not self.selected_report:
+            sel = self.tree.selection()
+            if sel:
+                rep_id = sel[0]
+                found = [r for r in self.all_reports if str(r.get("id")) == str(rep_id)]
+                if not found and hasattr(self, "filtered_reports") and self.filtered_reports:
+                    found = [r for r in self.filtered_reports if str(r.get("id")) == str(rep_id)]
+                if found:
+                    self.selected_report = found[0]
+                    self._apply_row_highlight(rep_id)
+
         if not self.selected_report:
             messagebox.showwarning("Chưa chọn" if self.current_lang == "vi" else ("未选择" if self.current_lang == "zh" else "Not Selected"),
                                    "Vui lòng click chọn một báo cáo trên bảng để xóa!" if self.current_lang == "vi" else ("请在表格中选择一条报告进行删除！" if self.current_lang == "zh" else "Please select a report row to delete!"))
@@ -2503,7 +2718,7 @@ class AnomalyReportView(ctk.CTkFrame):
                 ok = svc.delete_report(rep["id"], rep.get("image_url"))
                 if ok:
                     if hasattr(self, "drawer") and self.drawer.winfo_manager() == "grid":
-                        if str(self.drawer.report_data.get("id")) == str(rep.get("id")):
+                        if self.drawer.report_data and str(self.drawer.report_data.get("id")) == str(rep.get("id")):
                             self.drawer.close_drawer()
                     self.selected_report = None
                     self._update_action_buttons_state()
@@ -2578,3 +2793,4 @@ class AnomalyReportView(ctk.CTkFrame):
                                 foreground="#A7F3D0" if is_dark else "#166534")
         self.tree.tag_configure("tag_open", background="#7F1D1D" if is_dark else "#FEE2E2",
                                 foreground="#FECACA" if is_dark else "#991B1B")
+        self.tree.tag_configure("selected_row", background="#0D9488", foreground="#FFFFFF")
