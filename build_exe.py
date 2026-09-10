@@ -96,6 +96,7 @@ def build():
         sys.exit(1)
 
     exe_path = os.path.join("dist", "VIPQC AI.exe")
+    target_path = "VIPQC AI.exe"
     if os.path.exists(exe_path):
         try:
             shutil.copy2(exe_path, target_path)

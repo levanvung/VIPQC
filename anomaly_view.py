@@ -77,7 +77,7 @@ I18N_ANOMALY = {
         "btn_open_marking": "🖼️ Soi & Vẽ Ảnh",
         "btn_add": "➕ Thêm Báo Cáo",
         "tbl_count": "Danh Sách Báo Cáo: {count} bản ghi",
-        "hint_label": "💡 Click vào 'Ảnh Lỗi' trên bảng để Soi & Đánh Dấu (Studio). Click đúp vào dòng để Sửa trong Drawer.",
+        "hint_label": "💡 Click chọn dòng để Sửa/Xóa. Click đúp vào Ảnh để Soi & Đánh Dấu (Studio), click đúp vào dòng để Sửa.",
         "ctx_open_marking": "🖼️ Soi & Đánh Dấu Ảnh Lỗi (Studio)",
         "ctx_edit": "✏️ Chỉnh Sửa Báo Cáo",
         "ctx_delete": "🗑️ Xóa Báo Cáo Này",
@@ -169,7 +169,7 @@ I18N_ANOMALY = {
         "btn_open_marking": "🖼️ 查看与标记",
         "btn_add": "➕ 新增报告",
         "tbl_count": "异常报告列表: {count} 条记录",
-        "hint_label": "💡 点击表格中的'图片'即可在工作室中查看与标记。双击行可在抽屉中编辑。",
+        "hint_label": "💡 单击行可选择并编辑/删除。双击'图片'单元格进入工作室，双击数据行可在抽屉中编辑。",
         "ctx_open_marking": "🖼️ 查看与标记图片 (工作室)",
         "ctx_edit": "✏️ 编辑此报告",
         "ctx_delete": "🗑️ 删除此报告",
@@ -261,7 +261,7 @@ I18N_ANOMALY = {
         "btn_open_marking": "🖼️ Mark Image",
         "btn_add": "➕ Add Report",
         "tbl_count": "Report List: {count} records",
-        "hint_label": "💡 Click 'Image' cell to inspect & mark (Studio). Double-click row to edit in Drawer.",
+        "hint_label": "💡 Click row to select (Edit/Delete). Double-click 'Image' for Studio, double-click row to edit in Drawer.",
         "ctx_open_marking": "🖼️ Inspect & Mark Image (Studio)",
         "ctx_edit": "✏️ Edit Report",
         "ctx_delete": "🗑️ Delete Report",
@@ -522,10 +522,12 @@ class AnomalyImageStudioWindow(ctk.CTkToplevel):
     90-degree rotations, and complete marking/annotation tools (boxes, ovals, arrows, freehand, text).
     Allows saving the annotated image back to Supabase or downloading to local disk.
     """
-    def __init__(self, parent, report_data: dict, initial_pil: Image.Image = None, on_image_updated=None, lang_code: str = "vi"):
+    def __init__(self, parent, report_data: dict, initial_pil: Image.Image = None, on_image_updated=None, on_close=None, lang_code: str = "vi"):
         super().__init__(parent)
         self.report_data = report_data
         self.on_image_updated = on_image_updated
+        self.on_close = on_close
+        self._parent_ref = parent
         self.image_url = report_data.get("image_url", "")
         self.lang_code = lang_code
         t = I18N_ANOMALY.get(lang_code, I18N_ANOMALY["vi"])
@@ -537,6 +539,7 @@ class AnomalyImageStudioWindow(ctk.CTkToplevel):
         self.minsize(980, 640)
         self.configure(fg_color=BG_DEEP)
         self.transient(parent)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
 
         # Image state
         self.raw_image_bytes = None
@@ -1260,6 +1263,20 @@ class AnomalyImageStudioWindow(ctk.CTkToplevel):
         self.btn_save_cloud.configure(state="normal", text="💾 Lưu Lên Báo Cáo")
         messagebox.showerror("Lỗi Lưu Cloud", f"Không thể lưu ảnh lên Cloud:\n{err_msg}")
 
+    def destroy(self):
+        cb = getattr(self, "on_close", None)
+        if cb:
+            try:
+                cb()
+            except Exception as e:
+                print(f"[Studio] on_close callback warning: {e}")
+        try:
+            if hasattr(self, "_parent_ref") and self._parent_ref:
+                self._parent_ref.focus_set()
+        except Exception:
+            pass
+        super().destroy()
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DRAWER: CREATE / EDIT ANOMALY REPORT (SLIDE-IN PANEL WITH IMAGE PREVIEW)
@@ -1628,12 +1645,14 @@ class AnomalyDrawerFrame(ctk.CTkFrame):
             messagebox.showinfo(t["no_img_title"], t["no_img_alert"], parent=self)
             return
 
+        cur_id = self.report_data.get("id")
+
         def _on_updated(updated_rep):
             if isinstance(updated_rep, dict) and updated_rep.get("image_url"):
                 self.report_data["image_url"] = updated_rep.get("image_url")
                 self._load_remote_thumb(updated_rep.get("image_url"))
             if self.main_view:
-                self.main_view.refresh_data()
+                self.main_view.refresh_data(keep_id=cur_id)
 
         AnomalyImageStudioWindow(self.main_view, self.report_data, initial_pil=self.current_pil_image,
                                  on_image_updated=_on_updated, lang_code=self.current_lang)
@@ -2167,27 +2186,47 @@ class AnomalyReportView(ctk.CTkFrame):
             self._populate_tree(self.all_reports)
 
     # ── DATA FETCH & POPULATE ────────────────────────────────────────────────
-    def refresh_data(self):
-        """Fetches reports from Supabase asynchronously."""
+    def refresh_data(self, keep_id=None):
+        """Fetches reports from Supabase asynchronously, preserving row selection."""
         t = I18N_ANOMALY.get(self.current_lang, I18N_ANOMALY["vi"])
         self.btn_refresh.configure(state="disabled", text=t["btn_refreshing"])
+
+        target_id = keep_id or (self.selected_report.get("id") if self.selected_report else None)
 
         def _fetch():
             try:
                 reps = svc.fetch_all_reports()
-                safe_after(self, 0, lambda: self._on_fetch_success(reps))
+                safe_after(self, 0, lambda: self._on_fetch_success(reps, target_id=target_id))
             except Exception as e:
                 safe_after(self, 0, lambda: self._on_fetch_error(str(e)))
 
         threading.Thread(target=_fetch, daemon=True).start()
 
-    def _on_fetch_success(self, reports: list[dict]):
+    def _on_fetch_success(self, reports: list[dict], target_id=None):
         t = I18N_ANOMALY.get(self.current_lang, I18N_ANOMALY["vi"])
         self.all_reports = reports
-        self.selected_report = None
-        self._update_action_buttons_state()
         self.btn_refresh.configure(state="normal", text=t["btn_refresh"])
         self._apply_filter()
+
+        # Preserve selection if the target report still exists
+        if target_id is not None:
+            found = [r for r in self.all_reports if str(r.get("id")) == str(target_id)]
+            if found:
+                self.selected_report = found[0]
+                try:
+                    if self.tree.exists(str(target_id)):
+                        self.tree.selection_set(str(target_id))
+                        self.tree.focus(str(target_id))
+                        self.tree.see(str(target_id))
+                except Exception:
+                    pass
+            else:
+                self.selected_report = None
+        else:
+            self.selected_report = None
+
+        self._update_action_buttons_state()
+
         if hasattr(self.app, "show_toast"):
             self.app.show_toast(f"✅ Đồng bộ {len(reports)} báo cáo từ Supabase Cloud." if self.current_lang == "vi" else (
                 f"✅ 已从 Supabase 云端同步 {len(reports)} 条报告。" if self.current_lang == "zh" else
@@ -2287,27 +2326,37 @@ class AnomalyReportView(ctk.CTkFrame):
             self._update_action_buttons_state()
 
     def _on_row_double_click(self, event):
-        """Double clicking a row opens the Drawer to edit the report."""
-        if not self.selected_report:
-            return
-        self._on_edit_report()
-
-    def _on_tree_cell_click(self, event):
-        """Clicking directly on the 'Image / Ảnh / 图片' column cell (#0) opens the Image Studio, or prompts to add image in Drawer."""
+        """
+        Double clicking on a row:
+        - If double clicking on the Image column (#0): opens the Image Marking Studio.
+        - If double clicking on any data column: opens the Drawer to edit the report.
+        """
         col_id = self.tree.identify_column(event.x)
         row_id = self.tree.identify_row(event.y)
         region = self.tree.identify_region(event.x, event.y)
-        if row_id and (col_id == "#0" or region == "tree"):
+        if row_id:
             self.tree.selection_set(row_id)
             self._on_row_select(None)
-            found = [r for r in self.all_reports if str(r.get("id")) == str(row_id)]
-            if found:
-                t = I18N_ANOMALY.get(self.current_lang, I18N_ANOMALY["vi"])
-                if found[0].get("image_url"):
-                    self.after(50, self._open_marking_studio)
-                else:
-                    if messagebox.askyesno(t["no_img_title"], t["no_img_prompt"], parent=self):
-                        self._on_edit_report()
+
+        if not self.selected_report:
+            return
+
+        if col_id == "#0" or region == "tree":
+            t = I18N_ANOMALY.get(self.current_lang, I18N_ANOMALY["vi"])
+            if self.selected_report.get("image_url"):
+                self._open_marking_studio()
+            else:
+                if messagebox.askyesno(t["no_img_title"], t["no_img_prompt"], parent=self):
+                    self._on_edit_report()
+        else:
+            self._on_edit_report()
+
+    def _on_tree_cell_click(self, event):
+        """Single click on any cell (including Image #0) ensures reliable row selection and button activation."""
+        row_id = self.tree.identify_row(event.y)
+        if row_id:
+            self.tree.selection_set(row_id)
+            self._on_row_select(None)
 
     def _update_action_buttons_state(self):
         has_sel = self.selected_report is not None
@@ -2344,10 +2393,33 @@ class AnomalyReportView(ctk.CTkFrame):
             messagebox.showinfo(t["no_img_title"], t["no_img_alert"])
             return
 
-        def _on_img_updated(new_rep):
-            self.refresh_data()
+        cur_id = self.selected_report.get("id")
 
-        AnomalyImageStudioWindow(self, self.selected_report, on_image_updated=_on_img_updated, lang_code=self.current_lang)
+        def _on_img_updated(new_rep):
+            target_id = new_rep.get("id") if isinstance(new_rep, dict) else cur_id
+            self.refresh_data(keep_id=target_id)
+
+        def _on_studio_closed():
+            # Guarantee row selection and action buttons remain active when studio closes
+            if cur_id:
+                try:
+                    if self.tree.exists(str(cur_id)):
+                        self.tree.selection_set(str(cur_id))
+                        self.tree.focus(str(cur_id))
+                        found = [r for r in self.all_reports if str(r.get("id")) == str(cur_id)]
+                        if found:
+                            self.selected_report = found[0]
+                except Exception:
+                    pass
+            self._update_action_buttons_state()
+
+        AnomalyImageStudioWindow(
+            self,
+            self.selected_report,
+            on_image_updated=_on_img_updated,
+            on_close=_on_studio_closed,
+            lang_code=self.current_lang
+        )
 
     # ── ADMIN & PASSWORD VERIFICATION ────────────────────────────────────────
     def _require_admin(self, callback):
